@@ -1,6 +1,6 @@
 import React from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Modal, Input, message, Spin } from 'antd';
+import { Modal, Input, message, Spin, Table } from 'antd';
 
 function App() {
   const [items, setItems] = React.useState<{ name: string; size: number; updated?: string }[]>([]);
@@ -13,6 +13,10 @@ function App() {
   const [renameModal, setRenameModal] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
   const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
   const [sortDir, setSortDir] = React.useState<'asc'|'desc'>('asc');
+  // search/query state
+  const [query, setQuery] = React.useState('');
+  const [lastQueryMs, setLastQueryMs] = React.useState(0);
+  const [selectedKeys, setSelectedKeys] = React.useState<React.Key[]>([]);
   const sortedItems = React.useMemo(() => {
     const arr = items.slice();
     const dirMul = sortDir === 'asc' ? 1 : -1;
@@ -26,6 +30,60 @@ function App() {
     });
     return arr;
   }, [items, sortKey, sortDir]);
+  // debounced query filter
+  function useDebounced<T>(value: T, ms: number) {
+    const [v, setV] = React.useState(value);
+    React.useEffect(() => {
+      const id = setTimeout(() => setV(value), ms);
+      return () => clearTimeout(id);
+    }, [value, ms]);
+    return v;
+  }
+  const debouncedQuery = useDebounced(query, 200);
+  const displayItems = React.useMemo(() => {
+    const t0 = performance.now();
+    let arr = sortedItems;
+    const q = debouncedQuery.trim();
+    if (q) {
+      const m = q.match(/ext:([\w]+)|size:([<>]=?|=)?(\d+)(kb|mb|gb)?/gi) || [];
+      let ext: string | null = null;
+      let sizeCmp: { op: string; bytes: number } | null = null;
+      for (const token of m) {
+        const extM = token.match(/^ext:(\w+)$/i);
+        if (extM) ext = extM[1].toLowerCase();
+        const sizeM = token.match(/^size:([<>]=?|=)?(\d+)(kb|mb|gb)?$/i);
+        if (sizeM) {
+          const op = sizeM[1] || '>';
+          const num = Number(sizeM[2]);
+          const unit = (sizeM[3] || '').toLowerCase();
+          const mul = unit === 'gb' ? 1024*1024*1024 : unit === 'mb' ? 1024*1024 : unit === 'kb' ? 1024 : 1;
+          sizeCmp = { op, bytes: num * mul };
+        }
+      }
+      const text = q.replace(/ext:\w+|size:[^\s]+/gi, ' ').trim().toLowerCase();
+      arr = arr.filter(it => {
+        const rel = it.name.slice(prefix.length);
+        if (ext && !rel.toLowerCase().endsWith('.' + ext)) return false;
+        if (sizeCmp) {
+          const s = it.size || 0;
+          const b = sizeCmp.bytes;
+          const op = sizeCmp.op;
+          if (op === '>') { if (!(s > b)) return false; }
+          else if (op === '>=') { if (!(s >= b)) return false; }
+          else if (op === '<') { if (!(s < b)) return false; }
+          else if (op === '<=') { if (!(s <= b)) return false; }
+          else if (op === '=') { if (!(s === b)) return false; }
+        }
+        if (text) {
+          return rel.toLowerCase().includes(text) || it.name.toLowerCase().includes(text);
+        }
+        return true;
+      });
+    }
+    const ms = Math.max(0, Math.round(performance.now() - t0));
+    setLastQueryMs(ms);
+    return arr;
+  }, [sortedItems, debouncedQuery, prefix]);
   // Create folder modal state
   const [createFolder, setCreateFolder] = React.useState<{ open: boolean; name: string }>({ open: false, name: '' });
   const [renameFolder, setRenameFolder] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
@@ -317,7 +375,7 @@ function App() {
     <div style={{fontFamily: 'sans-serif', padding: 24}}>
       <h1>GCS File Manager</h1>
       <p>React + Electron + GCS 연결</p>
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
         <button onClick={listObjects} disabled={loading} style={{ marginRight: 8 }}>
           {loading ? '불러오는 중…' : '목록 새로고침'}
         </button>
@@ -329,18 +387,27 @@ function App() {
         </span>
         <button onClick={refreshUsage} style={{ marginLeft: 8 }}>용량 새로고침</button>
       </div>
-      {/* Sorting controls */}
-      <div style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-        <span>정렬:</span>
-        <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
-          <option value="name">이름</option>
-          <option value="size">크기</option>
-          <option value="updated">수정일</option>
-        </select>
-        <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)}>
-          <option value="asc">오름차순</option>
-          <option value="desc">내림차순</option>
-        </select>
+      {/* Search bar */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <Input
+          placeholder="검색 (예: beam ext:xlsx size:>5MB)"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ maxWidth: 520 }}
+        />
+        <span style={{ color: '#888' }}>결과 {displayItems.length.toLocaleString()}개 • {lastQueryMs}ms</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <label>정렬</label>
+          <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
+            <option value="name">이름</option>
+            <option value="size">크기</option>
+            <option value="updated">수정일</option>
+          </select>
+          <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)}>
+            <option value="asc">오름차순</option>
+            <option value="desc">내림차순</option>
+          </select>
+        </div>
       </div>
       <div {...getRootProps()} style={{
         border: '2px dashed #999',
@@ -386,40 +453,101 @@ function App() {
           );
         })}
       </div>
-      {/* Folders from server-side prefixes */}
+      {/* Folders and Files */}
       <Spin spinning={loading} tip="불러오는 중…">
-        <FolderAndFileList
-          items={sortedItems}
-          folders={folders}
-          prefix={prefix}
-          onEnterFolder={(childFullPrefix) => setPrefix(childFullPrefix)}
-          onDeleteFolder={(fullPrefix) => {
-            Modal.confirm({
-              title: '폴더 삭제 확인',
-              content: <div><code>{fullPrefix}</code> 및 하위 모든 파일을 삭제하시겠습니까?</div>,
-              okText: '삭제',
-              okButtonProps: { danger: true },
-              cancelText: '취소',
-              onOk: async () => {
-                try {
-                  await window.gcs.deletePrefix(fullPrefix);
-                  await listObjects();
-                  message.success('폴더 삭제 완료');
-                } catch (e: any) {
-                  message.error(e?.message || String(e));
-                }
+        {/* Folders quick list */}
+        {folders.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <h3 style={{ margin: '8px 0' }}>폴더</h3>
+            <ul>
+              {folders.map(full => {
+                const seg = full.slice(prefix.length).replace(/\/$/, '');
+                return (
+                  <li key={full} style={{ marginBottom: 4 }}>
+                    <button onClick={() => setPrefix(full)} style={{ marginRight: 8 }}>열기</button>
+                    <strong>{seg}</strong>
+                    <button onClick={() => setRenameFolder({ open: true, src: full, value: seg })} style={{ marginLeft: 8 }}>이름변경</button>
+                    <button onClick={() => {
+                      Modal.confirm({
+                        title: '폴더 삭제 확인',
+                        content: <div><code>{full}</code> 및 하위 모든 파일을 삭제하시겠습니까?</div>,
+                        okText: '삭제',
+                        okButtonProps: { danger: true },
+                        cancelText: '취소',
+                        onOk: async () => {
+                          try { await window.gcs.deletePrefix(full); await listObjects(); message.success('폴더 삭제 완료'); }
+                          catch (e: any) { message.error(e?.message || String(e)); }
+                        }
+                      });
+                    }} style={{ marginLeft: 8 }}>삭제</button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {/* Files table */}
+        <Table
+          size="small"
+          rowKey={(r) => r.name}
+          dataSource={displayItems}
+          pagination={false}
+          rowSelection={{
+            selectedRowKeys: selectedKeys,
+            onChange: (keys) => setSelectedKeys(keys),
+          }}
+          columns={[
+            {
+              title: '이름',
+              dataIndex: 'name',
+              key: 'name',
+              render: (_: any, it: any) => <code>{it.name.slice(prefix.length)}</code>,
+            },
+            {
+              title: '경로',
+              key: 'path',
+              render: (_: any, it: any) => {
+                const idx = it.name.lastIndexOf('/')
+                const p = idx >= 0 ? it.name.slice(0, idx+1) : '';
+                return <span style={{ color: '#666' }}>{p}</span>;
               },
-            });
-          }}
-          onRenameFolder={(fullPrefix) => {
-            const seg = fullPrefix.slice(prefix.length).replace(/\/$/, '');
-            setRenameFolder({ open: true, src: fullPrefix, value: seg });
-          }}
-          onDownload={downloadItem}
-          onDelete={deleteItem}
-          onRename={openRename}
+            },
+            {
+              title: '크기',
+              dataIndex: 'size',
+              key: 'size',
+              width: 110,
+              align: 'right' as const,
+              render: (v: number) => <span>{formatBytes(String(v||0))}</span>,
+            },
+            {
+              title: '수정일',
+              dataIndex: 'updated',
+              key: 'updated',
+              width: 180,
+              render: (v?: string) => v ? new Date(v).toLocaleString() : '-',
+            },
+            {
+              title: '작업',
+              key: 'actions',
+              width: 220,
+              render: (_: any, it: any) => (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => downloadItem(it.name)}>다운로드</button>
+                  <button onClick={() => deleteItem(it.name)}>삭제</button>
+                  <button onClick={() => openRename(it.name)}>이름변경</button>
+                </div>
+              )
+            }
+          ]}
         />
       </Spin>
+      {/* Status bar */}
+      <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #eee', color: '#666', display: 'flex', gap: 12 }}>
+        <span>표시: {displayItems.length.toLocaleString()}개</span>
+        <span>선택: {selectedKeys.length.toLocaleString()}개</span>
+      </div>
       {/* Error banner removed; using message.error */}
       {/* Rename Modal */}
       <Modal
