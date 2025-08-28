@@ -8,7 +8,7 @@ function App() {
   const [loading, setLoading] = React.useState(false);
   // Removed explicit error state; using message.error for user feedback
   const [downloadsDir, setDownloadsDir] = React.useState<string>('');
-  const [ops, setOps] = React.useState<Record<string, { name: string; kind: 'upload'|'download'; percent: number }>>({});
+  const [ops, setOps] = React.useState<Record<string, { name: string; kind: 'upload'|'download'|'rename'; percent: number }>>({});
   const [prefix, setPrefix] = React.useState<string>('');
   const [renameModal, setRenameModal] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
   const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
@@ -26,6 +26,38 @@ function App() {
     });
     return arr;
   }, [items, sortKey, sortDir]);
+  // Create folder modal state
+  const [createFolder, setCreateFolder] = React.useState<{ open: boolean; name: string }>({ open: false, name: '' });
+  const [renameFolder, setRenameFolder] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
+  const [usage, setUsage] = React.useState<{ bytes: string; count: number } | null>(null);
+  const [usageLoading, setUsageLoading] = React.useState(false);
+
+  const formatBytes = React.useCallback((bytesStr?: string) => {
+    if (!bytesStr) return '-';
+    let n = Number(bytesStr);
+    if (!isFinite(n) || isNaN(n)) return bytesStr;
+    const units = ['B','KB','MB','GB','TB','PB','EB'];
+    let u = 0;
+    while (n >= 1024 && u < units.length - 1) { n /= 1024; u++; }
+    if (u === 0) return `${Math.round(n)} ${units[u]}`;
+    return `${n.toFixed(1)} ${units[u]}`;
+  }, []);
+
+  const warnedRef = React.useRef(false);
+  const refreshUsage = React.useCallback(async () => {
+    setUsageLoading(true);
+    try {
+      const res = await window.gcs.getBucketUsage(prefix ? { prefix } : undefined);
+      setUsage(res);
+    } catch (e: any) {
+      if (!warnedRef.current) {
+        warnedRef.current = true;
+        message.warning('용량 조회에 실패했습니다. 잠시 후 다시 시도하세요.');
+      }
+    } finally {
+      setUsageLoading(false);
+    }
+  }, [prefix]);
 
   const listObjects = React.useCallback(async () => {
     setLoading(true);
@@ -51,6 +83,9 @@ function App() {
     })();
   }, []);
 
+  // Usage fetch on mount and when prefix changes
+  React.useEffect(() => { refreshUsage(); }, [refreshUsage, prefix]);
+
   // Fetch whenever prefix changes
   React.useEffect(() => {
     listObjects();
@@ -71,9 +106,36 @@ function App() {
         // Refresh list after uploads complete
         if (p.kind === 'upload') {
           listObjects();
+          refreshUsage();
         }
         if (p.kind === 'download' && p.savedTo) {
           message.success(`다운로드 완료: ${p.savedTo}`);
+        }
+        if (p.kind === 'rename') {
+          listObjects();
+          refreshUsage();
+          const failed = p.failed || [];
+          const copied = p.copied ?? 0;
+          if (failed.length) {
+            Modal.error({
+              title: '폴더 이름변경 완료(일부 실패)',
+              width: 680,
+              content: (
+                <div>
+                  <p>성공: {copied}개, 실패: {failed.length}개</p>
+                  <div style={{ maxHeight: 260, overflow: 'auto', background: '#fafafa', padding: 8, border: '1px solid #eee' }}>
+                    <ul>
+                      {failed.map((f: any) => (
+                        <li key={f.src}><code>{f.src}</code> — {f.error}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ),
+            });
+          } else {
+            message.success('폴더 이름변경 완료');
+          }
         }
       } else if (p.phase === 'error') {
         setOps(prev => {
@@ -260,6 +322,12 @@ function App() {
           {loading ? '불러오는 중…' : '목록 새로고침'}
         </button>
         <button onClick={pickAndUpload} disabled={loading}>파일 선택하여 업로드</button>
+        <button onClick={() => setCreateFolder({ open: true, name: '' })} disabled={loading} style={{ marginLeft: 8 }}>새 폴더</button>
+        <span style={{ marginLeft: 16, color: '#555' }}>
+          <strong>버킷 용량:</strong>{' '}
+          {usageLoading ? '조회 중…' : usage ? `${formatBytes(usage.bytes)} • 객체 ${usage.count.toLocaleString()}개` : '-'}
+        </span>
+        <button onClick={refreshUsage} style={{ marginLeft: 8 }}>용량 새로고침</button>
       </div>
       {/* Sorting controls */}
       <div style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -325,6 +393,28 @@ function App() {
           folders={folders}
           prefix={prefix}
           onEnterFolder={(childFullPrefix) => setPrefix(childFullPrefix)}
+          onDeleteFolder={(fullPrefix) => {
+            Modal.confirm({
+              title: '폴더 삭제 확인',
+              content: <div><code>{fullPrefix}</code> 및 하위 모든 파일을 삭제하시겠습니까?</div>,
+              okText: '삭제',
+              okButtonProps: { danger: true },
+              cancelText: '취소',
+              onOk: async () => {
+                try {
+                  await window.gcs.deletePrefix(fullPrefix);
+                  await listObjects();
+                  message.success('폴더 삭제 완료');
+                } catch (e: any) {
+                  message.error(e?.message || String(e));
+                }
+              },
+            });
+          }}
+          onRenameFolder={(fullPrefix) => {
+            const seg = fullPrefix.slice(prefix.length).replace(/\/$/, '');
+            setRenameFolder({ open: true, src: fullPrefix, value: seg });
+          }}
           onDownload={downloadItem}
           onDelete={deleteItem}
           onRename={openRename}
@@ -349,13 +439,105 @@ function App() {
           <div><small>원본: <code>{renameModal.src}</code></small></div>
         </div>
       </Modal>
+      {/* Create Folder Modal */}
+      <Modal
+        open={createFolder.open}
+        title="새 폴더 만들기"
+        okText="생성"
+        cancelText="취소"
+        onCancel={() => setCreateFolder({ open: false, name: '' })}
+        onOk={async () => {
+          const raw = (createFolder.name || '').trim();
+          if (!raw) { message.warning('폴더 이름을 입력하세요'); return; }
+          if (raw.includes('/')) { message.warning('폴더 이름에 "/" 를 포함할 수 없습니다'); return; }
+          const full = `${prefix}${raw}/`;
+          try {
+            await window.gcs.createPrefix(full);
+            message.success('폴더가 생성되었습니다');
+            setCreateFolder({ open: false, name: '' });
+            await listObjects();
+          } catch (e: any) {
+            message.error(e?.message || String(e));
+          }
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div><small>현재 경로: <code>{prefix || 'root'}</code></small></div>
+          <Input
+            placeholder="새 폴더 이름"
+            value={createFolder.name}
+            onChange={(e) => setCreateFolder({ open: true, name: e.target.value })}
+            onPressEnter={(e) => {
+              e.preventDefault();
+              const el = document.activeElement as HTMLElement | null;
+              if (el && typeof el.blur === 'function') el.blur();
+            }}
+          />
+        </div>
+      </Modal>
+      {/* Rename Folder Modal */}
+      <Modal
+        open={renameFolder.open}
+        title="폴더 이름변경"
+        okText="변경"
+        cancelText="취소"
+        onCancel={() => setRenameFolder({ open: false, src: '', value: '' })}
+        onOk={async () => {
+          const src = renameFolder.src; // full prefix e.g. a/b/
+          const newName = (renameFolder.value || '').trim();
+          if (!src) { setRenameFolder({ open: false, src: '', value: '' }); return; }
+          if (!newName) { message.warning('새 폴더 이름을 입력하세요'); return; }
+          if (newName.includes('/')) { message.warning('폴더 이름에 "/" 를 포함할 수 없습니다'); return; }
+          // parent is current prefix (the list context)
+          const dest = `${prefix}${newName}/`;
+          if (dest === src) { setRenameFolder({ open: false, src: '', value: '' }); return; }
+          try {
+            // probe if destination exists by listing one item
+            let overwrite = false;
+            try {
+              const probe = await window.gcs.list({ prefix: dest, maxResults: 1 });
+              const has = (probe.items && probe.items.length > 0) || (probe.prefixes && probe.prefixes.length > 0);
+              if (has) {
+                await new Promise<void>((resolve, reject) => {
+                  Modal.confirm({
+                    title: '덮어쓰기 확인',
+                    content: <div><code>{dest}</code> 가 이미 존재합니다. 덮어쓰시겠습니까?</div>,
+                    okText: '덮어쓰기',
+                    cancelText: '취소',
+                    onOk: () => resolve(),
+                    onCancel: () => reject(new Error('CANCEL')),
+                  });
+                });
+                overwrite = true;
+              }
+            } catch (e: any) {
+              if (e && e.message === 'CANCEL') return; // user canceled
+            }
+            const { opId } = await window.gcs.startRenamePrefix(src, dest, overwrite);
+            setOps(prev => ({ ...prev, [opId]: { name: `${src} -> ${dest}`, kind: 'rename', percent: 0 } }));
+            setRenameFolder({ open: false, src: '', value: '' });
+          } catch (e: any) {
+            message.error(e?.message || String(e));
+          }
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div><small>원본: <code>{renameFolder.src}</code></small></div>
+          <Input
+            autoFocus
+            placeholder="새 폴더 이름"
+            value={renameFolder.value}
+            onChange={(e) => setRenameFolder(prev => ({ ...prev, value: e.target.value }))}
+          />
+        </div>
+      </Modal>
     </div>
   );
 }
 
 // Helper component to render server-provided folders and files for a prefix
-function FolderAndFileList(props: { items: { name: string; size: number; updated?: string }[]; folders: string[]; prefix: string; onEnterFolder: (childPrefix: string) => void; onDownload: (name: string) => void; onDelete: (name: string) => void; onRename: (name: string) => void; }) {
-  const { items, folders, prefix, onEnterFolder, onDownload, onDelete, onRename } = props;
+function FolderAndFileList(props: { items: { name: string; size: number; updated?: string }[]; folders: string[]; prefix: string; onEnterFolder: (childPrefix: string) => void; onDeleteFolder: (fullPrefix: string) => void; onRenameFolder: (fullPrefix: string) => void; onDownload: (name: string) => void; onDelete: (name: string) => void; onRename: (name: string) => void; }) {
+  const { items, folders, prefix, onEnterFolder, onDeleteFolder, onRenameFolder, onDownload, onDelete, onRename } = props;
   // Sorting derived from parent settings via context would be ideal; for now, keep alphabetical for folders and compute in parent for files
   // Spinner wraps the lists using parent loading state by proximity (handled outside via overall UI)
   const fileList = React.useMemo(() => items.slice(), [items]);
@@ -373,6 +555,8 @@ function FolderAndFileList(props: { items: { name: string; size: number; updated
                 <li key={full} style={{ marginBottom: 4 }}>
                   <button onClick={() => onEnterFolder(full)} style={{ marginRight: 8 }}>열기</button>
                   <strong>{seg}</strong>
+                  <button onClick={() => onRenameFolder(full)} style={{ marginLeft: 8 }}>이름변경</button>
+                  <button onClick={() => onDeleteFolder(full)} style={{ marginLeft: 8 }}>삭제</button>
                 </li>
               );
             })}

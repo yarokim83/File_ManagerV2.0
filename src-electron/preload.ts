@@ -45,6 +45,21 @@ contextBridge.exposeInMainWorld('gcs', {
   rename: async (src: string, dest: string, overwrite?: boolean) => {
     return ipcRenderer.invoke('gcs:rename', { src, dest, overwrite });
   },
+  renamePrefix: async (srcPrefix: string, destPrefix: string, overwrite?: boolean) => {
+    return ipcRenderer.invoke('gcs:renamePrefix', { srcPrefix, destPrefix, overwrite });
+  },
+  startRenamePrefix: async (srcPrefix: string, destPrefix: string, overwrite?: boolean) => {
+    return ipcRenderer.invoke('gcs:startRenamePrefix', { srcPrefix, destPrefix, overwrite });
+  },
+  createPrefix: async (prefix: string) => {
+    return ipcRenderer.invoke('gcs:createPrefix', { prefix });
+  },
+  deletePrefix: async (prefix: string) => {
+    return ipcRenderer.invoke('gcs:deletePrefix', { prefix });
+  },
+  getBucketUsage: async (opts?: { prefix?: string }) => {
+    return ipcRenderer.invoke('gcs:getBucketUsage', opts);
+  },
 });
 
 contextBridge.exposeInMainWorld('sys', {

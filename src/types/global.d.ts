@@ -14,7 +14,12 @@ declare global {
       exists: (objectName: string) => Promise<{ exists: boolean }>;
       delete: (objectName: string) => Promise<{ deleted: boolean }>;
       rename: (src: string, dest: string, overwrite?: boolean) => Promise<{ name: string }>;
-      onProgress: (cb: (payload: { opId: string; kind: 'upload' | 'download'; name: string; phase: 'progress' | 'done' | 'error'; transferred?: number; total?: number; percent?: number; message?: string; savedTo?: string; }) => void) => () => void;
+      renamePrefix: (srcPrefix: string, destPrefix: string, overwrite?: boolean) => Promise<{ renamed: boolean; copied?: number; message?: string }>;
+      startRenamePrefix: (srcPrefix: string, destPrefix: string, overwrite?: boolean) => Promise<{ opId: string }>;
+      createPrefix: (prefix: string) => Promise<{ created: boolean; name: string }>;
+      deletePrefix: (prefix: string) => Promise<{ deleted: boolean }>;
+      getBucketUsage: (opts?: { prefix?: string }) => Promise<{ bytes: string; count: number }>;
+      onProgress: (cb: (payload: { opId: string; kind: 'upload' | 'download' | 'rename'; name: string; phase: 'progress' | 'done' | 'error'; transferred?: number; total?: number; percent?: number; message?: string; savedTo?: string; current?: string; count?: number; failedCount?: number; copied?: number; failed?: { src: string; error: string }[]; }) => void) => () => void;
     };
     sys: {
       downloadsDir: () => Promise<string>;

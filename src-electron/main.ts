@@ -52,7 +52,7 @@ const BUCKET_NAME = process.env.GCS_BUCKET || 'hpntfiles';
 // Operation registry for cancelation
 type OpRecord = {
   id: string;
-  type: 'upload' | 'download';
+  type: 'upload' | 'download' | 'rename';
   name: string;
   read?: fs.ReadStream | Readable;
   write?: fs.WriteStream | NodeJS.WritableStream;
@@ -117,6 +117,97 @@ ipcMain.handle('gcs:delete', async (_evt, args: { objectName: string }) => {
   return { deleted: true };
 });
 
+// Rename a folder prefix by copying all objects to a new prefix and deleting the old ones
+ipcMain.handle('gcs:renamePrefix', async (_evt, args: { srcPrefix: string; destPrefix: string; overwrite?: boolean }) => {
+  let { srcPrefix, destPrefix, overwrite = false } = args;
+  if (!srcPrefix || !destPrefix) throw new Error('srcPrefix and destPrefix are required');
+  const normSrc = srcPrefix.endsWith('/') ? srcPrefix : `${srcPrefix}/`;
+  const normDest = destPrefix.endsWith('/') ? destPrefix : `${destPrefix}/`;
+  if (normSrc === normDest) return { renamed: false, message: 'same prefix' };
+
+  const bucket = storage.bucket(BUCKET_NAME);
+  const [srcFiles] = await bucket.getFiles({ prefix: normSrc, autoPaginate: false, maxResults: 1 } as any);
+  if (!srcFiles.length) throw new Error(`원본 프리픽스에 파일이 없습니다: ${normSrc}`);
+
+  // Check dest existence
+  const [destProbe] = await bucket.getFiles({ prefix: normDest, autoPaginate: false, maxResults: 1 } as any);
+  if (destProbe.length) {
+    if (!overwrite) throw new Error(`대상 프리픽스가 이미 존재합니다: ${normDest}`);
+    // Clear destination if overwrite
+    await bucket.deleteFiles({ prefix: normDest });
+  }
+
+  // Fetch all source files (auto paginate)
+  const [allSrcFiles] = await bucket.getFiles({ prefix: normSrc } as any);
+  let copied = 0;
+  for (const f of allSrcFiles) {
+    const rel = f.name.slice(normSrc.length);
+    const destName = normDest + rel;
+    await f.copy(bucket.file(destName));
+    copied++;
+  }
+
+  // Delete source prefix
+  await bucket.deleteFiles({ prefix: normSrc });
+  return { renamed: true, copied };
+});
+
+// Start async rename with progress events
+ipcMain.handle('gcs:startRenamePrefix', async (evt, args: { srcPrefix: string; destPrefix: string; overwrite?: boolean }) => {
+  const win = BrowserWindow.fromWebContents(evt.sender);
+  if (!win) return;
+  let { srcPrefix, destPrefix, overwrite = false } = args;
+  if (!srcPrefix || !destPrefix) throw new Error('srcPrefix and destPrefix are required');
+  const normSrc = srcPrefix.endsWith('/') ? srcPrefix : `${srcPrefix}/`;
+  const normDest = destPrefix.endsWith('/') ? destPrefix : `${destPrefix}/`;
+  if (normSrc === normDest) throw new Error('same prefix');
+
+  const bucket = storage.bucket(BUCKET_NAME);
+  const [srcProbe] = await bucket.getFiles({ prefix: normSrc, autoPaginate: false, maxResults: 1 } as any);
+  if (!srcProbe.length) throw new Error(`원본 프리픽스에 파일이 없습니다: ${normSrc}`);
+  const [destProbe] = await bucket.getFiles({ prefix: normDest, autoPaginate: false, maxResults: 1 } as any);
+  if (destProbe.length && !overwrite) throw new Error(`대상 프리픽스가 이미 존재합니다: ${normDest}`);
+
+  const id = genId();
+  operations.set(id, { id, type: 'rename', name: `${normSrc} -> ${normDest}` });
+
+  // Run async but return opId immediately
+  ;(async () => {
+    try {
+      if (destProbe.length && overwrite) {
+        await bucket.deleteFiles({ prefix: normDest });
+      }
+      const [allSrcFiles] = await bucket.getFiles({ prefix: normSrc } as any);
+      const total = allSrcFiles.length;
+      let copied = 0;
+      const failed: { src: string; error: string }[] = [];
+      for (const f of allSrcFiles) {
+        const rel = f.name.slice(normSrc.length);
+        const destName = normDest + rel;
+        try {
+          await f.copy(bucket.file(destName));
+          copied++;
+          if (win) sendProgress(win, { opId: id, kind: 'rename', name: `${normSrc} -> ${normDest}`, phase: 'progress', count: copied, total, percent: total ? Math.round((copied/total)*100) : 0, current: f.name });
+        } catch (e: any) {
+          failed.push({ src: f.name, error: String(e?.message || e) });
+          if (win) sendProgress(win, { opId: id, kind: 'rename', name: `${normSrc} -> ${normDest}`, phase: 'progress', count: copied, total, percent: total ? Math.round((copied/total)*100) : 0, current: f.name, failedCount: failed.length });
+        }
+      }
+      // Attempt delete regardless of failures: delete only if any files exist
+      try {
+        await bucket.deleteFiles({ prefix: normSrc });
+      } catch {}
+      if (win) sendProgress(win, { opId: id, kind: 'rename', name: `${normSrc} -> ${normDest}`, phase: 'done', copied, failed });
+    } catch (err: any) {
+      if (win) sendProgress(win, { opId: id, kind: 'rename', name: `${normSrc} -> ${normDest}`, phase: 'error', message: String(err?.message || err) });
+    } finally {
+      operations.delete(id);
+    }
+  })();
+
+  return { opId: id };
+});
+
 ipcMain.handle('gcs:rename', async (_evt, args: { src: string; dest: string; overwrite?: boolean }) => {
   const { src, dest, overwrite = false } = args;
   const bucket = storage.bucket(BUCKET_NAME);
@@ -132,6 +223,56 @@ ipcMain.handle('gcs:rename', async (_evt, args: { src: string; dest: string; ove
   await srcRef.copy(destRef);
   await srcRef.delete({ ignoreNotFound: true } as any);
   return { name: dest };
+});
+
+// Get bucket (or prefix) usage: total bytes and object count
+ipcMain.handle('gcs:getBucketUsage', async (_evt, args?: { prefix?: string }) => {
+  const bucket = storage.bucket(BUCKET_NAME);
+  const prefix = args?.prefix;
+  const stream = bucket.getFilesStream(prefix ? { prefix } as any : undefined as any);
+  let count = 0;
+  let total = BigInt(0);
+  await new Promise<void>((resolve, reject) => {
+    stream
+      .on('data', (file: any) => {
+        try {
+          const sz = BigInt(file?.metadata?.size ?? 0);
+          total += sz;
+          count += 1;
+        } catch {
+          // ignore malformed size
+        }
+      })
+      .on('error', (err: any) => reject(err))
+      .on('end', () => resolve());
+  });
+  return { bytes: total.toString(), count };
+});
+
+// Create a 'folder' by creating an empty object whose name ends with '/'
+ipcMain.handle('gcs:createPrefix', async (_evt, args: { prefix: string }) => {
+  const { prefix } = args;
+  if (!prefix) throw new Error('prefix is required');
+  const norm = prefix.endsWith('/') ? prefix : `${prefix}/`;
+  const bucket = storage.bucket(BUCKET_NAME);
+  const fileRef = bucket.file(norm);
+  // If already exists, just return idempotently
+  const [exists] = await fileRef.exists();
+  if (!exists) {
+    await fileRef.save(Buffer.alloc(0));
+  }
+  return { created: true, name: norm };
+});
+
+// Delete all objects under a prefix (including an optional directory marker)
+ipcMain.handle('gcs:deletePrefix', async (_evt, args: { prefix: string }) => {
+  const { prefix } = args;
+  if (!prefix) throw new Error('prefix is required');
+  const bucket = storage.bucket(BUCKET_NAME);
+  // Use helper to delete all files with the given prefix
+  await bucket.deleteFiles({ prefix });
+  // Return basic result
+  return { deleted: true };
 });
 
 ipcMain.handle('gcs:upload', async (_evt, args: { localPath: string; destination: string; overwrite?: boolean }) => {
