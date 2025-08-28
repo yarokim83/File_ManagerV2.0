@@ -1,27 +1,44 @@
 import React from 'react';
 import { useDropzone } from 'react-dropzone';
+import { Modal, Input, message, Spin } from 'antd';
 
 function App() {
   const [items, setItems] = React.useState<{ name: string; size: number; updated?: string }[]>([]);
+  const [folders, setFolders] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+  // Removed explicit error state; using message.error for user feedback
   const [downloadsDir, setDownloadsDir] = React.useState<string>('');
   const [ops, setOps] = React.useState<Record<string, { name: string; kind: 'upload'|'download'; percent: number }>>({});
   const [prefix, setPrefix] = React.useState<string>('');
+  const [renameModal, setRenameModal] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
+  const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
+  const [sortDir, setSortDir] = React.useState<'asc'|'desc'>('asc');
+  const sortedItems = React.useMemo(() => {
+    const arr = items.slice();
+    const dirMul = sortDir === 'asc' ? 1 : -1;
+    arr.sort((a, b) => {
+      if (sortKey === 'name') return a.name.localeCompare(b.name) * dirMul;
+      if (sortKey === 'size') return ((a.size||0) - (b.size||0)) * dirMul;
+      // updated
+      const at = a.updated ? Date.parse(a.updated) : 0;
+      const bt = b.updated ? Date.parse(b.updated) : 0;
+      return (at - bt) * dirMul;
+    });
+    return arr;
+  }, [items, sortKey, sortDir]);
 
-  const listObjects = async () => {
+  const listObjects = React.useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
-      // Get more items to increase the chance newly uploaded files appear
-      const res = await window.gcs.list({ maxResults: 1000, prefix: '' });
+      const res = await window.gcs.list({ maxResults: 1000, prefix });
       setItems(res.items);
+      setFolders((res.prefixes || []).sort((a,b)=>a.localeCompare(b)));
     } catch (e: any) {
-      setError(e?.message || String(e));
+      message.error(e?.message || String(e));
     } finally {
       setLoading(false);
     }
-  };
+  }, [prefix]);
 
   React.useEffect(() => {
     (async () => {
@@ -34,11 +51,17 @@ function App() {
     })();
   }, []);
 
+  // Fetch whenever prefix changes
+  React.useEffect(() => {
+    listObjects();
+  }, [listObjects]);
+
   // Subscribe to progress events
   React.useEffect(() => {
     const off = window.gcs.onProgress((p) => {
       if (p.phase === 'progress') {
-        setOps(prev => ({ ...prev, [p.opId]: { name: p.name, kind: p.kind, percent: p.percent ?? 0 } }));
+        const percent = Math.round(p.percent ?? 0);
+        setOps(prev => ({ ...prev, [p.opId]: { name: p.name, kind: p.kind, percent } }));
       } else if (p.phase === 'done') {
         setOps(prev => {
           const n = { ...prev };
@@ -50,7 +73,7 @@ function App() {
           listObjects();
         }
         if (p.kind === 'download' && p.savedTo) {
-          alert(`다운로드 완료: ${p.savedTo}`);
+          message.success(`다운로드 완료: ${p.savedTo}`);
         }
       } else if (p.phase === 'error') {
         setOps(prev => {
@@ -58,7 +81,7 @@ function App() {
           delete n[p.opId];
           return n;
         });
-        setError(p.message || '작업 실패');
+        message.error(p.message || '작업 실패');
       }
     });
     return () => off();
@@ -74,9 +97,20 @@ function App() {
         try {
           const { exists } = await window.gcs.exists(dest);
           if (exists) {
-            overwrite = window.confirm(`같은 이름의 파일이 이미 존재합니다.\n\n${dest}\n\n덮어쓰시겠습니까?`);
-            if (!overwrite) {
-              continue; // skip this file
+            try {
+              await new Promise<void>((resolve, reject) => {
+                Modal.confirm({
+                  title: '덮어쓰기 확인',
+                  content: <div><code>{dest}</code> 가 이미 존재합니다. 덮어쓰시겠습니까?</div>,
+                  okText: '덮어쓰기',
+                  cancelText: '취소',
+                  onOk: () => resolve(),
+                  onCancel: () => reject(new Error('CANCEL')),
+                });
+              });
+              overwrite = true;
+            } catch (e: any) {
+              continue; // user canceled overwrite -> skip this file
             }
           }
         } catch {
@@ -89,7 +123,7 @@ function App() {
       }
       // List will refresh on 'done' events
     } catch (e: any) {
-      setError(e?.message || String(e));
+      message.error(e?.message || String(e));
     }
   };
 
@@ -103,7 +137,7 @@ function App() {
       const { opId } = await window.gcs.startDownload(name, pick.filePath);
       setOps(prev => ({ ...prev, [opId]: { name, kind: 'download', percent: 0 } }));
     } catch (e: any) {
-      setError(e?.message || String(e));
+      message.error(e?.message || String(e));
     }
   };
 
@@ -115,9 +149,20 @@ function App() {
         try {
           const { exists } = await window.gcs.exists(dest);
           if (exists) {
-            overwrite = window.confirm(`같은 이름의 파일이 이미 존재합니다.\n\n${dest}\n\n덮어쓰시겠습니까?`);
-            if (!overwrite) {
-              continue;
+            try {
+              await new Promise<void>((resolve, reject) => {
+                Modal.confirm({
+                  title: '덮어쓰기 확인',
+                  content: <div><code>{dest}</code> 가 이미 존재합니다. 덮어쓰시겠습니까?</div>,
+                  okText: '덮어쓰기',
+                  cancelText: '취소',
+                  onOk: () => resolve(),
+                  onCancel: () => reject(new Error('CANCEL')),
+                });
+              });
+              overwrite = true;
+            } catch (e: any) {
+              continue; // user canceled overwrite -> skip this file
             }
           }
         } catch {
@@ -130,9 +175,9 @@ function App() {
       }
       // list refresh handled by progress listener
     } catch (e: any) {
-      setError(e?.message || String(e));
+      message.error(e?.message || String(e));
     }
-  }, [listObjects, prefix]);
+  }, [prefix]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop: handleDrop, multiple: true });
 
@@ -141,15 +186,93 @@ function App() {
     setOps(prev => { const n = { ...prev }; delete n[opId]; return n; });
   };
 
+  const deleteItem = (name: string) => {
+    Modal.confirm({
+      title: '삭제 확인',
+      content: <div><code>{name}</code> 를 삭제하시겠습니까?</div>,
+      okText: '삭제',
+      okButtonProps: { danger: true },
+      cancelText: '취소',
+      onOk: async () => {
+        try {
+          await window.gcs.delete(name);
+          await listObjects();
+          message.success('삭제 완료');
+        } catch (e: any) {
+          message.error(e?.message || String(e));
+        }
+      },
+    });
+  };
+
+  const openRename = (name: string) => {
+    const base = name.split('/').pop() as string;
+    setRenameModal({ open: true, src: name, value: `${prefix}${base}` });
+  };
+
+  const handleRenameOk = async () => {
+    const { src, value } = renameModal;
+    if (!value || value === src) {
+      setRenameModal({ open: false, src: '', value: '' });
+      return;
+    }
+    try {
+      let overwrite = false;
+      try {
+        const { exists } = await window.gcs.exists(value);
+        if (exists) {
+          await new Promise<void>((resolve, reject) => {
+            Modal.confirm({
+              title: '덮어쓰기 확인',
+              content: <div><code>{value}</code> 가 이미 존재합니다. 덮어쓰시겠습니까?</div>,
+              okText: '덮어쓰기',
+              cancelText: '취소',
+              onOk: () => resolve(),
+              onCancel: () => reject(new Error('CANCEL')),
+            });
+          });
+          overwrite = true;
+        }
+      } catch (e: any) {
+        if (e && e.message === 'CANCEL') {
+          return; // user canceled overwrite
+        }
+        // proceed if exists check failed
+      }
+      await window.gcs.rename(src, value, overwrite);
+      message.success('이름변경 완료');
+      await listObjects();
+    } catch (e: any) {
+      message.error(e?.message || String(e));
+    } finally {
+      setRenameModal({ open: false, src: '', value: '' });
+    }
+  };
+
+  const handleRenameCancel = () => setRenameModal({ open: false, src: '', value: '' });
+
   return (
     <div style={{fontFamily: 'sans-serif', padding: 24}}>
       <h1>GCS File Manager</h1>
       <p>React + Electron + GCS 연결</p>
       <div style={{ marginBottom: 12 }}>
         <button onClick={listObjects} disabled={loading} style={{ marginRight: 8 }}>
-          {loading ? '불러오는 중...' : '목록 새로고침'}
+          {loading ? '불러오는 중…' : '목록 새로고침'}
         </button>
-        <button onClick={pickAndUpload}>파일 선택하여 업로드</button>
+        <button onClick={pickAndUpload} disabled={loading}>파일 선택하여 업로드</button>
+      </div>
+      {/* Sorting controls */}
+      <div style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+        <span>정렬:</span>
+        <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
+          <option value="name">이름</option>
+          <option value="size">크기</option>
+          <option value="updated">수정일</option>
+        </select>
+        <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)}>
+          <option value="asc">오름차순</option>
+          <option value="desc">내림차순</option>
+        </select>
       </div>
       <div {...getRootProps()} style={{
         border: '2px dashed #999',
@@ -195,44 +318,64 @@ function App() {
           );
         })}
       </div>
-      {/* Folder list derived from items */}
-      <FolderAndFileList items={items} prefix={prefix} onEnterFolder={(f) => setPrefix(prefix + f + '/')} onDownload={downloadItem} />
-      {error && <div style={{ color: 'red' }}>에러: {error}</div>}
+      {/* Folders from server-side prefixes */}
+      <Spin spinning={loading} tip="불러오는 중…">
+        <FolderAndFileList
+          items={sortedItems}
+          folders={folders}
+          prefix={prefix}
+          onEnterFolder={(childFullPrefix) => setPrefix(childFullPrefix)}
+          onDownload={downloadItem}
+          onDelete={deleteItem}
+          onRename={openRename}
+        />
+      </Spin>
+      {/* Error banner removed; using message.error */}
+      {/* Rename Modal */}
+      <Modal
+        open={renameModal.open}
+        title="이름변경"
+        onOk={handleRenameOk}
+        onCancel={handleRenameCancel}
+        okText="변경"
+        cancelText="취소"
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <Input
+            autoFocus
+            value={renameModal.value}
+            onChange={(e) => setRenameModal(prev => ({ ...prev, value: e.target.value }))}
+          />
+          <div><small>원본: <code>{renameModal.src}</code></small></div>
+        </div>
+      </Modal>
     </div>
   );
 }
 
-// Helper component to render folders and files for a prefix
-function FolderAndFileList(props: { items: { name: string; size: number; updated?: string }[]; prefix: string; onEnterFolder: (folder: string) => void; onDownload: (name: string) => void; }) {
-  const { items, prefix, onEnterFolder, onDownload } = props;
-  const folders = new Set<string>();
-  const files: { name: string; size: number; updated?: string }[] = [];
-  for (const it of items) {
-    if (!it.name.startsWith(prefix)) continue;
-    const rest = it.name.slice(prefix.length);
-    const slash = rest.indexOf('/');
-    if (slash >= 0) {
-      const folder = rest.slice(0, slash);
-      if (folder) folders.add(folder);
-    } else {
-      files.push(it);
-    }
-  }
-  const folderList = Array.from(folders).sort((a,b)=>a.localeCompare(b));
-  const fileList = files.sort((a,b)=>a.name.localeCompare(b.name));
+// Helper component to render server-provided folders and files for a prefix
+function FolderAndFileList(props: { items: { name: string; size: number; updated?: string }[]; folders: string[]; prefix: string; onEnterFolder: (childPrefix: string) => void; onDownload: (name: string) => void; onDelete: (name: string) => void; onRename: (name: string) => void; }) {
+  const { items, folders, prefix, onEnterFolder, onDownload, onDelete, onRename } = props;
+  // Sorting derived from parent settings via context would be ideal; for now, keep alphabetical for folders and compute in parent for files
+  // Spinner wraps the lists using parent loading state by proximity (handled outside via overall UI)
+  const fileList = React.useMemo(() => items.slice(), [items]);
   return (
     <div>
       {/* Folders */}
-      {folderList.length > 0 && (
+      {folders.length > 0 && (
         <div style={{ marginBottom: 8 }}>
           <h3 style={{ margin: '8px 0' }}>폴더</h3>
           <ul>
-            {folderList.map(f => (
-              <li key={f} style={{ marginBottom: 4 }}>
-                <button onClick={() => onEnterFolder(f)} style={{ marginRight: 8 }}>열기</button>
-                <strong>{f}</strong>
-              </li>
-            ))}
+            {folders.map(full => {
+              // full is like `${prefix}name/`
+              const seg = full.slice(prefix.length).replace(/\/$/, '');
+              return (
+                <li key={full} style={{ marginBottom: 4 }}>
+                  <button onClick={() => onEnterFolder(full)} style={{ marginRight: 8 }}>열기</button>
+                  <strong>{seg}</strong>
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -242,9 +385,15 @@ function FolderAndFileList(props: { items: { name: string; size: number; updated
         {fileList.map(it => {
           const rel = it.name.slice(prefix.length);
           return (
-            <li key={it.name} style={{ marginBottom: 6 }}>
-              <code>{rel}</code> {it.size ? `(${it.size} bytes)` : ''} {it.updated ? `- ${new Date(it.updated).toLocaleString()}` : ''}
-              <button style={{ marginLeft: 8 }} onClick={() => onDownload(it.name)}>다운로드</button>
+            <li key={it.name} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <div style={{ flex: 1 }}>
+                <code>{rel}</code> {it.size ? `(${it.size} bytes)` : ''} {it.updated ? `- ${new Date(it.updated).toLocaleString()}` : ''}
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button onClick={() => onDownload(it.name)}>다운로드</button>
+                <button onClick={() => onDelete(it.name)}>삭제</button>
+                <button onClick={() => onRename(it.name)}>이름변경</button>
+              </div>
             </li>
           );
         })}

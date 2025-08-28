@@ -39,6 +39,12 @@ contextBridge.exposeInMainWorld('gcs', {
     progressListeners.add(cb);
     return () => progressListeners.delete(cb);
   },
+  delete: async (objectName: string) => {
+    return ipcRenderer.invoke('gcs:delete', { objectName });
+  },
+  rename: async (src: string, dest: string, overwrite?: boolean) => {
+    return ipcRenderer.invoke('gcs:rename', { src, dest, overwrite });
+  },
 });
 
 contextBridge.exposeInMainWorld('sys', {

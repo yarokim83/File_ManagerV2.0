@@ -88,9 +88,18 @@ ipcMain.handle('sys:saveFile', async (_evt, args: { defaultPath?: string } = {})
 
 ipcMain.handle('gcs:list', async (_evt, args: { prefix?: string; pageToken?: string; maxResults?: number } = {}) => {
   const { prefix, pageToken, maxResults = 1000 } = args || {};
-  const [files, nextQuery] = await storage.bucket(BUCKET_NAME).getFiles({ prefix, autoPaginate: false, pageToken, maxResults });
+  const bucket = storage.bucket(BUCKET_NAME);
+  const [files, nextQuery, apiResponse] = await bucket.getFiles({
+    prefix: prefix || undefined,
+    delimiter: '/',
+    autoPaginate: false,
+    pageToken,
+    maxResults,
+  } as any);
+  const prefixes: string[] = (apiResponse as any)?.prefixes || [];
   return {
     items: files.map(f => ({ name: f.name, size: Number(f.metadata?.size || 0), updated: f.metadata?.updated })),
+    prefixes,
     nextPageToken: (nextQuery as any)?.pageToken || null,
   };
 });
@@ -99,6 +108,30 @@ ipcMain.handle('gcs:exists', async (_evt, args: { objectName: string }) => {
   const { objectName } = args;
   const [exists] = await storage.bucket(BUCKET_NAME).file(objectName).exists();
   return { exists };
+});
+
+ipcMain.handle('gcs:delete', async (_evt, args: { objectName: string }) => {
+  const { objectName } = args;
+  const fileRef = storage.bucket(BUCKET_NAME).file(objectName);
+  await fileRef.delete({ ignoreNotFound: true } as any);
+  return { deleted: true };
+});
+
+ipcMain.handle('gcs:rename', async (_evt, args: { src: string; dest: string; overwrite?: boolean }) => {
+  const { src, dest, overwrite = false } = args;
+  const bucket = storage.bucket(BUCKET_NAME);
+  const srcRef = bucket.file(src);
+  const destRef = bucket.file(dest);
+  const [srcExists] = await srcRef.exists();
+  if (!srcExists) throw new Error(`원본이 존재하지 않습니다: ${src}`);
+  const [destExists] = await destRef.exists();
+  if (destExists) {
+    if (!overwrite) throw new Error(`대상에 이미 존재합니다: ${dest}`);
+    await destRef.delete();
+  }
+  await srcRef.copy(destRef);
+  await srcRef.delete({ ignoreNotFound: true } as any);
+  return { name: dest };
 });
 
 ipcMain.handle('gcs:upload', async (_evt, args: { localPath: string; destination: string; overwrite?: boolean }) => {
