@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Builds / bundles
+build/
+dist/
+release/
+
+# Caches
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Env
+.env
+.env.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Electron
+*.asar
+
+# Misc
+coverage/
+.tmp/
+*.pid

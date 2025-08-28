@@ -1,0 +1,71 @@
+{
+  "name": "gcs-file-manager",
+  "version": "1.0.0",
+  "description": "Google Cloud Storage File Manager with Drag & Drop",
+  "main": "dist/main.js",
+  "homepage": "./",
+  "scripts": {
+    "start": "concurrently \"npm run start:renderer\" \"wait-on http://localhost:3000 && npm run start:electron\"",
+    "start:renderer": "react-scripts start",
+    "start:electron": "npm run build:electron && electron .",
+    "build": "react-scripts build && npm run build:electron",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:all": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder --publish=never",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.5.0",
+    "antd": "^5.10.0",
+    "electron-is-dev": "^2.0.0",
+    "path": "^0.12.7",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-dropzone": "^14.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.0",
+    "@types/react": "^18.2.25",
+    "@types/react-dom": "^18.2.10",
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "react-scripts": "5.0.1",
+    "typescript": "^4.9.5",
+    "wait-on": "^7.0.1"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "build": {
+    "appId": "com.gcs.filemanager",
+    "productName": "GCS File Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "build/**/*",
+      "dist/main.js",
+      "node_modules/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
