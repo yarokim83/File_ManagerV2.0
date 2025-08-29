@@ -16,6 +16,69 @@ function App() {
   const [folderSort, setFolderSort] = React.useState<'name'|'recent'>('name');
   const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
   const [sortDir, setSortDir] = React.useState<'asc'|'desc'>('asc');
+  // Column widths (resizable) with localStorage persistence
+  type ColKey = 'name' | 'status' | 'path' | 'size' | 'updated';
+  const [colW, setColW] = React.useState<Record<ColKey, number>>(() => {
+    try {
+      const raw = localStorage.getItem('table.colW');
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return { name: 360, status: 160, path: 260, size: 110, updated: 180 };
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem('table.colW', JSON.stringify(colW)); } catch {}
+  }, [colW]);
+  // Drag-to-resize handlers
+  const dragRef = React.useRef<{ key: ColKey; startX: number; startW: number } | null>(null);
+  const onDragMove = React.useCallback((e: MouseEvent) => {
+    const d = dragRef.current; if (!d) return;
+    const dx = e.clientX - d.startX;
+    const next = Math.max(80, d.startW + dx);
+    setColW(prev => ({ ...prev, [d.key]: next }));
+  }, []);
+  const endDrag = React.useCallback(() => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', endDrag);
+  }, [onDragMove]);
+  const startDrag = (key: ColKey, e: React.MouseEvent) => {
+    dragRef.current = { key, startX: e.clientX, startW: colW[key] };
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', endDrag);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  // Cleanup listeners on unmount (safety)
+  React.useEffect(() => {
+    return () => {
+      document.removeEventListener('mousemove', onDragMove);
+      document.removeEventListener('mouseup', endDrag);
+    };
+  }, [onDragMove, endDrag]);
+  // Header renderer with resize handle
+  const Header = (label: string, colKey: ColKey, sortable?: 'name'|'size'|'updated') => {
+    const sortableActive = sortable && sortKey === sortable;
+    const onClick = sortable ? (() => {
+      if (sortKey === sortable) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+      else { setSortKey(sortable); setSortDir('asc'); }
+    }) : undefined;
+    return (
+      <div style={{ position: 'relative', paddingRight: 6 }}>
+        <span
+          style={{ cursor: sortable ? 'pointer' : 'default', userSelect: 'none', color: sortableActive ? '#1677ff' : undefined }}
+          onClick={onClick}
+        >
+          {label} {sortableActive ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
+        </span>
+        <div
+          onMouseDown={(e) => startDrag(colKey, e)}
+          style={{ position: 'absolute', top: 0, right: 0, width: 6, cursor: 'col-resize', height: '100%' }}
+          title="폭 조절"
+        />
+      </div>
+    );
+  };
   // search/query state
   const [query, setQuery] = React.useState('');
   const [lastQueryMs, setLastQueryMs] = React.useState(0);
@@ -44,6 +107,16 @@ function App() {
   const [ctxTarget, setCtxTarget] = React.useState<string | null>(null);
   // Failed operations by object name
   const [failed, setFailed] = React.useState<Record<string, { upload?: boolean; download?: boolean; rename?: boolean }>>({});
+  // Minimal virtual scroll state
+  const [rowH, setRowH] = React.useState(30);
+  const [scrollY, setScrollY] = React.useState(560);
+  const [autoScrollY, setAutoScrollY] = React.useState(true);
+  const [vThreshold, setVThreshold] = React.useState(800); // enable virtualization when many rows
+  const [vStart, setVStart] = React.useState(0);
+  const vBuffer = 10;
+  const tableWrapRef = React.useRef<HTMLDivElement | null>(null);
+  // Compact header: toggle for showing drag & drop area
+  const [showDrop, setShowDrop] = React.useState(false);
   const sortedItems = React.useMemo(() => {
     const arr = items.slice();
     const dirMul = sortDir === 'asc' ? 1 : -1;
@@ -111,6 +184,123 @@ function App() {
     setLastQueryMs(ms);
     return arr;
   }, [sortedItems, debouncedQuery, prefix]);
+  // Virtual slice builder
+  const vEnabled = displayItems.length > vThreshold;
+  const vSlice = React.useMemo(() => {
+    if (!vEnabled) return { data: displayItems, topPad: 0, botPad: 0 };
+    const viewCnt = Math.max(1, Math.ceil(scrollY / Math.max(1, rowH)));
+    const start = Math.max(0, Math.min(vStart, Math.max(0, displayItems.length - 1)));
+    const end = Math.min(displayItems.length, start + viewCnt + vBuffer);
+    const topPad = start * rowH;
+    const botPad = Math.max(0, (displayItems.length - end) * rowH);
+    const data: any[] = [];
+    if (topPad) data.push({ __pad: '__top', __h: topPad });
+    data.push(...displayItems.slice(start, end));
+    if (botPad) data.push({ __pad: '__bottom', __h: botPad });
+    return { data, topPad, botPad };
+  }, [displayItems, vEnabled, vStart, scrollY, rowH]);
+  // Attach scroll listener to table body
+  React.useEffect(() => {
+    if (!vEnabled) return;
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    const body = wrap.querySelector('.ant-table-body');
+    if (!body) return;
+    const onScroll = () => {
+      const st = (body as HTMLElement).scrollTop;
+      setVStart(Math.floor(st / rowH));
+      // persist scrollTop per prefix
+      try {
+        const key = 'scroll.pos.' + prefix;
+        localStorage.setItem(key, String(st));
+      } catch {}
+    };
+    body.addEventListener('scroll', onScroll);
+    return () => { body.removeEventListener('scroll', onScroll as any); };
+  }, [vEnabled, displayItems.length, rowH]);
+
+  // Restore scrollTop per prefix when changing folder or data
+  React.useEffect(() => {
+    if (!vEnabled) return;
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    const body = wrap.querySelector('.ant-table-body') as HTMLElement | null;
+    if (!body) return;
+    try {
+      const key = 'scroll.pos.' + prefix;
+      const saved = Number(localStorage.getItem(key) || 0);
+      const maxScroll = Math.max(0, displayItems.length * rowH - scrollY);
+      const target = Math.min(Math.max(0, saved), maxScroll);
+      if (isFinite(target) && target >= 0) {
+        body.scrollTop = target;
+        setVStart(Math.floor(target / rowH));
+      }
+    } catch {}
+  }, [prefix, vEnabled, displayItems.length, rowH, scrollY]);
+
+  // Settings: load from localStorage once
+  React.useEffect(() => {
+    try {
+      const sY = localStorage.getItem('ui.scrollY');
+      const aY = localStorage.getItem('ui.autoScrollY');
+      const vt = localStorage.getItem('ui.vThreshold');
+      if (sY) setScrollY(Math.max(240, Number(sY)) || 560);
+      if (aY != null) setAutoScrollY(aY === '1' || aY === 'true');
+      if (vt) setVThreshold(Math.max(0, Number(vt)) || 800);
+    } catch {}
+  }, []);
+
+  // Settings: persist changes
+  React.useEffect(() => {
+    try { localStorage.setItem('ui.scrollY', String(scrollY)); } catch {}
+  }, [scrollY]);
+  React.useEffect(() => {
+    try { localStorage.setItem('ui.autoScrollY', autoScrollY ? '1' : '0'); } catch {}
+  }, [autoScrollY]);
+  React.useEffect(() => {
+    try { localStorage.setItem('ui.vThreshold', String(vThreshold)); } catch {}
+  }, [vThreshold]);
+
+  // Auto compute scrollY by viewport height
+  const recomputeScrollY = React.useCallback(() => {
+    if (!autoScrollY) return;
+    const wrap = tableWrapRef.current;
+    const top = wrap?.getBoundingClientRect().top ?? 0;
+    const footerReserve = 160; // space for status bar/margins
+    const next = Math.max(240, Math.floor(window.innerHeight - top - footerReserve));
+    if (Number.isFinite(next)) setScrollY(next);
+  }, [autoScrollY]);
+
+  React.useEffect(() => {
+    if (!autoScrollY) return;
+    const onResize = () => recomputeScrollY();
+    // compute on mount and next frame (to ensure layout done)
+    recomputeScrollY();
+    const id = window.setTimeout(recomputeScrollY, 0);
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); window.clearTimeout(id); };
+  }, [autoScrollY, recomputeScrollY]);
+
+  // Measure actual row height from a real (non-padding) row to improve accuracy
+  React.useEffect(() => {
+    const wrap = tableWrapRef.current;
+    if (!wrap) return;
+    const tr = wrap.querySelector('.ant-table-body tr[data-row-key]:not([data-row-key^="__"])') as HTMLElement | null;
+    if (tr) {
+      const h = tr.offsetHeight;
+      if (h && Math.abs(h - rowH) > 2) setRowH(h);
+    }
+  }, [vSlice.data, displayItems.length]);
+
+  // Selection refinement: prune selections not in current results and clear on prefix change
+  React.useEffect(() => {
+    const set = new Set(displayItems.map((it: any) => it.name));
+    setSelectedKeys((prev: string[]) => prev.filter((k) => set.has(String(k))));
+  }, [displayItems]);
+
+  React.useEffect(() => {
+    setSelectedKeys([]);
+  }, [prefix]);
   // Create folder modal state
   const [createFolder, setCreateFolder] = React.useState<{ open: boolean; name: string }>({ open: false, name: '' });
   const [renameFolder, setRenameFolder] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
@@ -519,47 +709,76 @@ function App() {
   };
 
   return (
-    <div style={{fontFamily: 'sans-serif', padding: 24}}>
-      <h1>GCS File Manager</h1>
-      <p>React + Electron + GCS 연결</p>
-      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button onClick={listObjects} disabled={loading} style={{ marginRight: 8 }}>
-          {loading ? '불러오는 중…' : '목록 새로고침'}
-        </button>
-        <button onClick={pickAndUpload} disabled={loading}>파일 선택하여 업로드</button>
-        <button onClick={() => setCreateFolder({ open: true, name: '' })} disabled={loading} style={{ marginLeft: 8 }}>새 폴더</button>
-        <span style={{ marginLeft: 16, color: '#555' }}>
-          <strong>버킷 용량:</strong>{' '}
-          {usageLoading ? '조회 중…' : usage ? `${formatBytes(usage.bytes)} • 객체 ${usage.count.toLocaleString()}개` : '-'}
-        </span>
-        <button onClick={refreshUsage} style={{ marginLeft: 8 }}>용량 새로고침</button>
+    <div style={{fontFamily: 'sans-serif', padding: 16}}>
+      {/* Top toolbar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <h2 style={{ margin: 0 }}>GCS File Manager</h2>
+          <span style={{ color: '#999', fontSize: 12 }}>React · Electron · GCS</span>
+        </div>
+        <Space size={6} wrap>
+          <Tooltip title="목록 새로고침">
+            <Button size="small" onClick={listObjects} loading={loading}>갱신</Button>
+          </Tooltip>
+          <Tooltip title="파일 선택하여 업로드">
+            <Button size="small" icon={<CloudUploadOutlined />} onClick={pickAndUpload} disabled={loading}>업로드</Button>
+          </Tooltip>
+          <Tooltip title="새 폴더">
+            <Button size="small" onClick={() => setCreateFolder({ open: true, name: '' })} disabled={loading}>새 폴더</Button>
+          </Tooltip>
+          <span style={{ color: '#555', marginLeft: 4 }}>
+            {usageLoading ? '용량 조회 중…' : (usage ? `용량 ${formatBytes(usage.bytes)} • ${usage.count.toLocaleString()}개` : '-')}
+          </span>
+          <Tooltip title="용량 새로고침">
+            <Button size="small" onClick={refreshUsage}>↻</Button>
+          </Tooltip>
+        </Space>
       </div>
-      {/* Search bar */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+      {/* Search + quick toggles */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
         <Input
           placeholder="검색 (예: beam ext:xlsx size:>5MB)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          style={{ maxWidth: 520 }}
+          style={{ maxWidth: 420 }}
         />
         <span style={{ color: '#888' }}>결과 {displayItems.length.toLocaleString()}개 • {lastQueryMs}ms</span>
-        {/* 정렬 Select 제거: 헤더 클릭으로만 정렬 */}
+        <Button type="link" size="small" onClick={() => setShowDrop(s => !s)}>
+          {showDrop ? '드래그 영역 숨기기' : '드래그 영역 열기'}
+        </Button>
       </div>
-      <div {...getRootProps()} style={{
-        border: '2px dashed #999',
-        padding: 24,
-        borderRadius: 8,
-        background: isDragActive ? '#f0fbff' : '#fafafa',
-        color: '#555',
-        marginBottom: 16
-      }}>
-        <input {...getInputProps()} />
-        {isDragActive ? (
-          <p>여기에 파일을 놓아 업로드하세요…</p>
-        ) : (
-          <p>또는 이 영역에 파일을 드래그 앤 드롭 하세요</p>
-        )}
+      {/* Breadcrumb (moved up to reduce vertical gaps) */}
+      <div style={{ margin: '4px 0', color: '#555' }}>
+        <strong>경로:</strong>{' '}
+        <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setPrefix('')}>root</span>
+        {prefix.split('/').filter(Boolean).map((seg, idx, arr) => {
+          const to = arr.slice(0, idx + 1).join('/') + '/';
+          return (
+            <span key={to}>
+              {' / '}
+              <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setPrefix(to)}>{seg}</span>
+            </span>
+          );
+        })}
       </div>
+      {/* Collapsible drag & drop area */}
+      {showDrop && (
+        <div {...getRootProps()} style={{
+          border: '1px dashed #bbb',
+          padding: 12,
+          borderRadius: 8,
+          background: isDragActive ? '#f0fbff' : '#fafafa',
+          color: '#555',
+          marginBottom: 10
+        }}>
+          <input {...getInputProps()} />
+          {isDragActive ? (
+            <p style={{ margin: 0 }}>여기에 파일을 놓아 업로드하세요…</p>
+          ) : (
+            <p style={{ margin: 0 }}>또는 이 영역에 파일을 드래그 앤 드롭 하세요</p>
+          )}
+        </div>
+      )}
       {!!Object.keys(ops).length && (
         <div style={{ marginBottom: 16 }}>
           <h3>진행 중 작업</h3>
@@ -575,20 +794,7 @@ function App() {
           ))}
         </div>
       )}
-      {/* Breadcrumb */}
-      <div style={{ margin: '8px 0' }}>
-        <strong>경로:</strong>{' '}
-        <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setPrefix('')}>root</span>
-        {prefix.split('/').filter(Boolean).map((seg, idx, arr) => {
-          const to = arr.slice(0, idx + 1).join('/') + '/';
-          return (
-            <span key={to}>
-              {' / '}
-              <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setPrefix(to)}>{seg}</span>
-            </span>
-          );
-        })}
-      </div>
+      {/* Breadcrumb moved above */}
       {/* Folders and Files */}
       <Spin spinning={loading} tip="불러오는 중…">
         {/* Folders quick list */}
@@ -711,46 +917,65 @@ function App() {
           }}
         >
           <div
+            ref={tableWrapRef}
             style={{ width: '100%' }}
             onContextMenu={(e) => {
               const el = e.target as HTMLElement;
               const tr = el.closest('tr[data-row-key]') as HTMLElement | null;
               if (tr) {
                 const key = tr.getAttribute('data-row-key');
+                // ignore padding rows
+                if (key && key.startsWith('__')) return;
                 if (key) setCtxTarget(key);
               }
             }}
           >
           <style>{`
+            /* Compact spacing */
+            .ant-table-thead > tr > th { padding: 6px 8px; }
+            .ant-table-tbody > tr > td { padding: 6px 8px; }
+            .ant-table { font-size: 12.5px; }
+            .ant-list-item { padding: 6px 8px; }
+            h3, h4 { margin: 8px 0; }
+            /* Keep upload highlighting */
             .row-uploading td { background-color: #fff7e6; }
           `}</style>
           <Table
             size="small"
             pagination={false}
-            rowKey={(r) => r.name}
-            dataSource={displayItems}
+            rowKey={(r: any) => (r && r.__pad) ? r.__pad : r.name}
+            dataSource={vSlice.data as any}
+            scroll={{ x: colW.name + colW.status + colW.path + colW.size + colW.updated + 200, y: scrollY }}
+            sticky={{ offsetHeader: 0 }}
+            rowSelection={{
+              // disable selection for padding rows
+              selectedRowKeys: selectedKeys,
+              onChange: (keys) => setSelectedKeys((keys as React.Key[]).filter((k) => typeof k === 'string' && !String(k).startsWith('__')) as string[]),
+              getCheckboxProps: (record: any) => ({ disabled: !!record?.__pad }),
+              hideSelectAll: true,
+            }}
+            onRow={(record: any) => ({
+              onClick: (e) => { if (record?.__pad) e.stopPropagation(); },
+              onDoubleClick: (e) => { if (record?.__pad) e.stopPropagation(); },
+              onContextMenu: (e) => { if (record?.__pad) e.preventDefault(); },
+            })}
             columns={[
               {
-                title: (() => {
-                  const onClick = () => {
-                    if (sortKey === 'name') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-                    else { setSortKey('name'); setSortDir('asc'); }
-                  };
-                  return (
-                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'name' ? '#1677ff' : undefined }} onClick={onClick}>
-                      이름 {sortKey === 'name' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
-                    </span>
-                  );
-                })(),
+                title: Header('이름', 'name', 'name'),
                 dataIndex: 'name',
                 key: 'name',
-                render: (v: string) => <code>{v.slice(prefix.length)}</code>,
+                width: colW.name,
+                fixed: 'left' as const,
+                render: (v: string, it: any) => it && it.__pad ? (
+                  <div style={{ height: it.__h }} />
+                ) : <code>{v.slice(prefix.length)}</code>,
               },
               {
-                title: '상태',
+                title: Header('상태', 'status'),
                 key: 'status',
-                width: 160,
-                render: (_: any, it: { name: string }) => {
+                width: colW.status,
+                render: (_: any, it: any) => {
+                  if (it && it.__pad) return null;
                   const uploading = Object.values(ops).find(o => o.kind === 'upload' && o.name === it.name);
                   if (uploading) {
                     return (
@@ -761,23 +986,20 @@ function App() {
                       </div>
                     );
                   }
-                  // Show failure state if exists
                   const fail = failed[it.name];
-                  if (fail && (fail.upload || fail.download || fail.rename)) {
+                  if (fail?.upload) {
                     return (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <CloseCircleTwoTone twoToneColor="#ff4d4f" />
-                        <span style={{ color: '#ff4d4f' }}>실패</span>
-                        {fail.upload && (
-                          <Tooltip title="업로드 재시도">
-                            <Button size="small" icon={<RedoOutlined />} onClick={() => retryUpload(it.name)} />
-                          </Tooltip>
-                        )}
-                        {fail.download && (
-                          <Tooltip title="다운로드 재시도">
-                            <Button size="small" icon={<RedoOutlined />} onClick={() => retryDownload(it.name)} />
-                          </Tooltip>
-                        )}
+                        <Button size="small" type="link" icon={<RedoOutlined />} onClick={() => retryUpload(it.name)}>재시도</Button>
+                      </div>
+                    );
+                  }
+                  if (fail?.download) {
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <CloseCircleTwoTone twoToneColor="#ff4d4f" />
+                        <Button size="small" type="link" icon={<RedoOutlined />} onClick={() => retryDownload(it.name)}>재시도</Button>
                       </div>
                     );
                   }
@@ -790,47 +1012,34 @@ function App() {
                 },
               },
               {
-                title: '경로',
+                title: Header('경로', 'path'),
                 key: 'path',
+                width: colW.path,
                 render: (_: any, it: any) => {
+                  if (it && it.__pad) return null;
                   const idx = it.name.lastIndexOf('/');
                   const p = idx >= 0 ? it.name.slice(0, idx + 1) : '';
                   return <span style={{ color: '#666' }}>{p}</span>;
                 },
               },
               {
-                title: (() => {
-                  const onClick = () => {
-                    if (sortKey === 'size') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-                    else { setSortKey('size'); setSortDir('asc'); }
-                  };
-                  return (
-                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'size' ? '#1677ff' : undefined }} onClick={onClick}>
-                      크기 {sortKey === 'size' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
-                    </span>
-                  );
-                })(),
+                title: Header('크기', 'size', 'size'),
                 dataIndex: 'size',
                 key: 'size',
-                width: 110,
+                width: colW.size,
                 align: 'right' as const,
-                render: (v: number) => <span>{formatBytes(String(v || 0))}</span>,
+                render: (v: number, it: any) => it && it.__pad ? null : <span>{formatBytes(String(v || 0))}</span>,
               },
               {
-                title: (() => {
-                  const onClick = () => {
-                    if (sortKey === 'updated') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
-                    else { setSortKey('updated'); setSortDir('asc'); }
-                  };
-                  return (
-                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'updated' ? '#1677ff' : undefined }} onClick={onClick}>
-                      수정일 {sortKey === 'updated' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
-                    </span>
-                  );
-                })(),
+                title: Header('수정일', 'updated', 'updated'),
+                dataIndex: 'updated',
                 key: 'updated',
-                width: 180,
-                render: (_: any, it: { updated?: string }) => it.updated ? new Date(it.updated).toLocaleString() : '-',
+                width: colW.updated,
+                fixed: 'right' as const,
+                render: (_: any, it: any) => {
+                  if (it && it.__pad) return null;
+                  return it.updated ? new Date(it.updated).toLocaleString() : '-';
+                },
               },
             ]}
           />
