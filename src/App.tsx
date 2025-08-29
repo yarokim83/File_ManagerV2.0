@@ -17,6 +17,7 @@ function App() {
   const [query, setQuery] = React.useState('');
   const [lastQueryMs, setLastQueryMs] = React.useState(0);
   const [selectedKeys, setSelectedKeys] = React.useState<React.Key[]>([]);
+  const [moveModal, setMoveModal] = React.useState<{ open: boolean; target: string; overwrite: boolean; busy?: boolean; progress?: { done: number; total: number; failed: number } }>({ open: false, target: '', overwrite: false });
   const sortedItems = React.useMemo(() => {
     const arr = items.slice();
     const dirMul = sortDir === 'asc' ? 1 : -1;
@@ -371,6 +372,44 @@ function App() {
 
   const handleRenameCancel = () => setRenameModal({ open: false, src: '', value: '' });
 
+  // Helpers for moving
+  const normPrefix = (p: string) => (p && !p.endsWith('/') ? p + '/' : p);
+  const openMoveSelected = () => {
+    const defTarget = prefix; // default to current folder
+    setMoveModal({ open: true, target: defTarget, overwrite: false, busy: false, progress: undefined });
+  };
+  const handleConfirmMove = async () => {
+    if (moveModal.busy) return;
+    const targetRaw = (moveModal.target || '').trim();
+    const target = normPrefix(targetRaw);
+    if (target === prefix) {
+      message.warning('현재 폴더와 대상 폴더가 같습니다');
+      return;
+    }
+    if (selectedKeys.length === 0) { message.warning('이동할 항목을 선택하세요'); return; }
+    setMoveModal(m => ({ ...m, busy: true, progress: { done: 0, total: selectedKeys.length, failed: 0 } }));
+    let done = 0, failed = 0;
+    for (const key of selectedKeys) {
+      const name = String(key);
+      const base = name.split('/').pop() as string;
+      const dest = `${target}${base}`;
+      try {
+        await window.gcs.rename(name, dest, moveModal.overwrite);
+      } catch (e: any) {
+        failed++;
+      } finally {
+        done++;
+        setMoveModal(m => ({ ...m, progress: { done, total: selectedKeys.length, failed } }));
+      }
+    }
+    setMoveModal({ open: false, target: '', overwrite: false, busy: false, progress: undefined });
+    await listObjects();
+    await refreshUsage();
+    setSelectedKeys([]);
+    if (failed) message.warning(`이동 완료: 성공 ${selectedKeys.length - failed}개, 실패 ${failed}개`);
+    else message.success(`이동 완료: ${selectedKeys.length}개`);
+  };
+
   return (
     <div style={{fontFamily: 'sans-serif', padding: 24}}>
       <h1>GCS File Manager</h1>
@@ -407,6 +446,7 @@ function App() {
             <option value="asc">오름차순</option>
             <option value="desc">내림차순</option>
           </select>
+          <button disabled={!selectedKeys.length} onClick={openMoveSelected}>선택 항목 이동</button>
         </div>
       </div>
       <div {...getRootProps()} style={{
@@ -565,6 +605,32 @@ function App() {
             onChange={(e) => setRenameModal(prev => ({ ...prev, value: e.target.value }))}
           />
           <div><small>원본: <code>{renameModal.src}</code></small></div>
+        </div>
+      </Modal>
+      {/* Move Selected Modal */}
+      <Modal
+        open={moveModal.open}
+        title="선택 항목 이동"
+        onCancel={() => (!moveModal.busy ? setMoveModal({ open: false, target: '', overwrite: false }) : null)}
+        okText={moveModal.busy ? '이동 중…' : '이동'}
+        okButtonProps={{ disabled: moveModal.busy }}
+        cancelButtonProps={{ disabled: moveModal.busy }}
+        onOk={handleConfirmMove}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div><small>선택: {selectedKeys.length}개</small></div>
+          <Input
+            placeholder="대상 폴더 경로(예: a/b/) — 비우면 root"
+            value={moveModal.target}
+            onChange={(e) => setMoveModal(m => ({ ...m, target: e.target.value }))}
+          />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input type="checkbox" checked={moveModal.overwrite} onChange={(e) => setMoveModal(m => ({ ...m, overwrite: e.target.checked }))} />
+            덮어쓰기 허용
+          </label>
+          {moveModal.progress && (
+            <div style={{ color: '#666' }}>진행: {moveModal.progress.done}/{moveModal.progress.total} • 실패 {moveModal.progress.failed}</div>
+          )}
         </div>
       </Modal>
       {/* Create Folder Modal */}
