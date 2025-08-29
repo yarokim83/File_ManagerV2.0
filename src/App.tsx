@@ -1,6 +1,7 @@
 import React from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Modal, Input, message, Spin, Table } from 'antd';
+import { Modal, Input, message, Spin, Dropdown, Table, Progress, Button, Tooltip, List, Space, Typography, Popconfirm, Avatar } from 'antd';
+import { FolderFilled, SortAscendingOutlined, SortDescendingOutlined, CloudUploadOutlined, CloudDownloadOutlined, EditOutlined, LoadingOutlined, CheckCircleTwoTone, CloseCircleTwoTone, RedoOutlined, DeleteOutlined, ClockCircleOutlined } from '@ant-design/icons';
 
 function App() {
   const [items, setItems] = React.useState<{ name: string; size: number; updated?: string }[]>([]);
@@ -11,6 +12,8 @@ function App() {
   const [ops, setOps] = React.useState<Record<string, { name: string; kind: 'upload'|'download'|'rename'; percent: number }>>({});
   const [prefix, setPrefix] = React.useState<string>('');
   const [renameModal, setRenameModal] = React.useState<{ open: boolean; src: string; value: string }>({ open: false, src: '', value: '' });
+  const [hoveredFolder, setHoveredFolder] = React.useState<string | null>(null);
+  const [folderSort, setFolderSort] = React.useState<'name'|'recent'>('name');
   const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
   const [sortDir, setSortDir] = React.useState<'asc'|'desc'>('asc');
   // search/query state
@@ -18,6 +21,29 @@ function App() {
   const [lastQueryMs, setLastQueryMs] = React.useState(0);
   const [selectedKeys, setSelectedKeys] = React.useState<React.Key[]>([]);
   const [moveModal, setMoveModal] = React.useState<{ open: boolean; target: string; overwrite: boolean; busy?: boolean; progress?: { done: number; total: number; failed: number } }>({ open: false, target: '', overwrite: false });
+  // Move folder picker state
+  const [movePickerPrefix, setMovePickerPrefix] = React.useState<string>('');
+  const [movePickerFolders, setMovePickerFolders] = React.useState<string[]>([]);
+  const [movePickerLoading, setMovePickerLoading] = React.useState<boolean>(false);
+  const [movePickerAsc, setMovePickerAsc] = React.useState<boolean>(true);
+  const [movePickerIndex, setMovePickerIndex] = React.useState<number>(-1);
+  const movePickerSortedFolders = React.useMemo(() => {
+    return [...movePickerFolders].sort((a, b) => movePickerAsc ? a.localeCompare(b) : b.localeCompare(a));
+  }, [movePickerFolders, movePickerAsc]);
+  // Compute sorted folders for display: 'name' uses localeCompare(KO), 'recent' keeps original order
+  const sortedFolders = React.useMemo(() => {
+    if (folderSort !== 'name') return folders;
+    const arr = [...folders];
+    arr.sort((a, b) => {
+      const sa = a.slice(prefix.length).replace(/\/$/, '');
+      const sb = b.slice(prefix.length).replace(/\/$/, '');
+      return sa.localeCompare(sb, 'ko');
+    });
+    return arr;
+  }, [folders, folderSort, prefix]);
+  const [ctxTarget, setCtxTarget] = React.useState<string | null>(null);
+  // Failed operations by object name
+  const [failed, setFailed] = React.useState<Record<string, { upload?: boolean; download?: boolean; rename?: boolean }>>({});
   const sortedItems = React.useMemo(() => {
     const arr = items.slice();
     const dirMul = sortDir === 'asc' ? 1 : -1;
@@ -123,7 +149,8 @@ function App() {
     try {
       const res = await window.gcs.list({ maxResults: 1000, prefix });
       setItems(res.items);
-      setFolders((res.prefixes || []).sort((a,b)=>a.localeCompare(b)));
+      // Keep server order; client applies optional name-sorting via sortedFolders
+      setFolders(res.prefixes || []);
     } catch (e: any) {
       message.error(e?.message || String(e));
     } finally {
@@ -150,8 +177,11 @@ function App() {
     listObjects();
   }, [listObjects]);
 
-  // Subscribe to progress events
+  // Subscribe to progress events (guarded for non-Electron browser context)
   React.useEffect(() => {
+    if (!(window as any).gcs || typeof window.gcs.onProgress !== 'function') {
+      return; // running in pure browser (CRA) without Electron preload
+    }
     const off = window.gcs.onProgress((p) => {
       if (p.phase === 'progress') {
         const percent = Math.round(p.percent ?? 0);
@@ -162,7 +192,6 @@ function App() {
           delete n[p.opId];
           return n;
         });
-        // Refresh list after uploads complete
         if (p.kind === 'upload') {
           listObjects();
           refreshUsage();
@@ -174,21 +203,15 @@ function App() {
           listObjects();
           refreshUsage();
           const failed = p.failed || [];
-          const copied = p.copied ?? 0;
           if (failed.length) {
             Modal.error({
-              title: '폴더 이름변경 완료(일부 실패)',
-              width: 680,
+              title: '일부 파일 이름변경 실패',
               content: (
                 <div>
-                  <p>성공: {copied}개, 실패: {failed.length}개</p>
-                  <div style={{ maxHeight: 260, overflow: 'auto', background: '#fafafa', padding: 8, border: '1px solid #eee' }}>
-                    <ul>
-                      {failed.map((f: any) => (
-                        <li key={f.src}><code>{f.src}</code> — {f.error}</li>
-                      ))}
-                    </ul>
-                  </div>
+                  <div>실패한 파일들:</div>
+                  <ul style={{ marginTop: 8 }}>
+                    {failed.map((f: any) => <li key={f.src || f}><code>{f.src || f}</code></li>)}
+                  </ul>
                 </div>
               ),
             });
@@ -202,11 +225,20 @@ function App() {
           delete n[p.opId];
           return n;
         });
+        // Track failed operations
+        setFailed(prev => {
+          const n = { ...prev };
+          if (!n[p.name]) n[p.name] = {};
+          if (p.kind === 'upload') n[p.name].upload = true;
+          else if (p.kind === 'download') n[p.name].download = true;
+          else if (p.kind === 'rename') n[p.name].rename = true;
+          return n;
+        });
         message.error(p.message || '작업 실패');
       }
     });
-    return () => off();
-  }, []);
+    return () => { try { off && off(); } catch {} };
+  }, [listObjects, refreshUsage]);
 
   const pickAndUpload = async () => {
     try {
@@ -247,6 +279,81 @@ function App() {
       message.error(e?.message || String(e));
     }
   };
+
+  // Retry helpers
+  const retryUpload = async (name: string) => {
+    try {
+      const paths = await window.sys.openFiles();
+      if (!paths || !paths.length) return;
+      const src = paths[0];
+      const overwrite = true; // retry implies allow overwrite to same name
+      const { opId } = await window.gcs.startUploadLocal(src, name, overwrite);
+      setOps(prev => ({ ...prev, [opId]: { name, kind: 'upload', percent: 0 } }));
+      setFailed(f => { const n = { ...f }; if (n[name]) { delete n[name].upload; if (!n[name].download && !n[name].rename) delete n[name]; } return n; });
+    } catch (e: any) {
+      message.error(e?.message || String(e));
+    }
+  };
+  const retryDownload = async (name: string) => {
+    try {
+      const base = name.split('/').pop() as string;
+      const suggested = `${downloadsDir}\\${base}`;
+      const pick = await window.sys.saveFile(suggested);
+      if (pick.canceled || !pick.filePath) return;
+      const { opId } = await window.gcs.startDownload(name, pick.filePath);
+      setOps(prev => ({ ...prev, [opId]: { name, kind: 'download', percent: 0 } }));
+      setFailed(f => { const n = { ...f }; if (n[name]) { delete n[name].download; if (!n[name].upload && !n[name].rename) delete n[name]; } return n; });
+    } catch (e: any) {
+      message.error(e?.message || String(e));
+    }
+  };
+
+  // Load subfolders for move picker when modal opens or picker prefix changes
+  React.useEffect(() => {
+    const load = async () => {
+      if (!moveModal.open) return;
+      setMovePickerLoading(true);
+      try {
+        const res = await window.gcs.list({ maxResults: 1000, prefix: movePickerPrefix });
+        setMovePickerFolders((res.prefixes || []));
+      } catch (e: any) {
+        message.error(e?.message || String(e));
+      } finally {
+        setMovePickerLoading(false);
+      }
+    };
+    load();
+  }, [moveModal.open, movePickerPrefix]);
+
+  // Reset/adjust focused index when list changes or opens
+  React.useEffect(() => {
+    if (!moveModal.open) return;
+    setMovePickerIndex(movePickerSortedFolders.length ? 0 : -1);
+  }, [moveModal.open, movePickerPrefix, movePickerFolders, movePickerAsc]);
+
+  // Context menu via AntD Dropdown - no custom outside click handling needed
+
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success('복사됨');
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+        message.success('복사됨');
+      } catch (e: any) {
+        message.error(e?.message || '복사 실패');
+      }
+    }
+  };
+
+  const ctxDownload = () => { if (ctxTarget) downloadItem(ctxTarget); setCtxTarget(null); };
+  const ctxDelete = () => { if (ctxTarget) deleteItem(ctxTarget); setCtxTarget(null); };
+  const ctxRename = () => { if (ctxTarget) openRename(ctxTarget); setCtxTarget(null); };
+  const ctxMove = () => { openMoveSelected(); setCtxTarget(null); };
+  const ctxCopyPath = () => { if (ctxTarget) copyToClipboard(ctxTarget); setCtxTarget(null); };
+  const ctxCopyFile = () => { if (ctxTarget) { const base = ctxTarget.split('/').pop() as string; copyToClipboard(base); } setCtxTarget(null); };
 
   const downloadItem = async (name: string) => {
     try {
@@ -377,6 +484,7 @@ function App() {
   const openMoveSelected = () => {
     const defTarget = prefix; // default to current folder
     setMoveModal({ open: true, target: defTarget, overwrite: false, busy: false, progress: undefined });
+    setMovePickerPrefix(defTarget);
   };
   const handleConfirmMove = async () => {
     if (moveModal.busy) return;
@@ -435,19 +543,7 @@ function App() {
           style={{ maxWidth: 520 }}
         />
         <span style={{ color: '#888' }}>결과 {displayItems.length.toLocaleString()}개 • {lastQueryMs}ms</span>
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-          <label>정렬</label>
-          <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)}>
-            <option value="name">이름</option>
-            <option value="size">크기</option>
-            <option value="updated">수정일</option>
-          </select>
-          <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)}>
-            <option value="asc">오름차순</option>
-            <option value="desc">내림차순</option>
-          </select>
-          <button disabled={!selectedKeys.length} onClick={openMoveSelected}>선택 항목 이동</button>
-        </div>
+        {/* 정렬 Select 제거: 헤더 클릭으로만 정렬 */}
       </div>
       <div {...getRootProps()} style={{
         border: '2px dashed #999',
@@ -498,95 +594,263 @@ function App() {
         {/* Folders quick list */}
         {folders.length > 0 && (
           <div style={{ marginBottom: 8 }}>
-            <h3 style={{ margin: '8px 0' }}>폴더</h3>
-            <ul>
-              {folders.map(full => {
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '8px 0' }}>
+              <h3 style={{ margin: 0 }}>폴더</h3>
+              <Space size={4}>
+                <Tooltip title="가나다순">
+                  <Button
+                    size="small"
+                    type={folderSort === 'name' ? 'primary' : 'default'}
+                    icon={<SortAscendingOutlined />}
+                    onClick={() => setFolderSort('name')}
+                  />
+                </Tooltip>
+                <Tooltip title="최근">
+                  <Button
+                    size="small"
+                    type={folderSort === 'recent' ? 'primary' : 'default'}
+                    icon={<ClockCircleOutlined />}
+                    onClick={() => setFolderSort('recent')}
+                  />
+                </Tooltip>
+              </Space>
+            </div>
+            <List
+              size="small"
+              dataSource={sortedFolders}
+              renderItem={(full: string) => {
                 const seg = full.slice(prefix.length).replace(/\/$/, '');
                 return (
-                  <li key={full} style={{ marginBottom: 4 }}>
-                    <button onClick={() => setPrefix(full)} style={{ marginRight: 8 }}>열기</button>
-                    <strong>{seg}</strong>
-                    <button onClick={() => setRenameFolder({ open: true, src: full, value: seg })} style={{ marginLeft: 8 }}>이름변경</button>
-                    <button onClick={() => {
-                      Modal.confirm({
-                        title: '폴더 삭제 확인',
-                        content: <div><code>{full}</code> 및 하위 모든 파일을 삭제하시겠습니까?</div>,
-                        okText: '삭제',
-                        okButtonProps: { danger: true },
-                        cancelText: '취소',
-                        onOk: async () => {
-                          try { await window.gcs.deletePrefix(full); await listObjects(); message.success('폴더 삭제 완료'); }
-                          catch (e: any) { message.error(e?.message || String(e)); }
-                        }
-                      });
-                    }} style={{ marginLeft: 8 }}>삭제</button>
-                  </li>
+                  <List.Item
+                    key={full}
+                    onMouseEnter={() => setHoveredFolder(full)}
+                    onMouseLeave={() => setHoveredFolder(h => (h === full ? null : h))}
+                    onDoubleClick={() => setPrefix(full)}
+                    actions={[
+                      <div key="actions" style={{ visibility: hoveredFolder === full ? 'visible' : 'hidden' }}>
+                        <Space size={6}>
+                          <Button size="small" type="link" icon={<FolderFilled />} onClick={() => setPrefix(full)}>
+                            열기
+                          </Button>
+                          <Button size="small" onClick={() => setRenameModal({ open: true, src: full, value: seg })} icon={<EditOutlined />}>
+                            이름변경
+                          </Button>
+                          <Popconfirm
+                            title="폴더 삭제 확인"
+                            description={(
+                              <div>
+                                <code>{full}</code> 및 하위 모든 파일을 삭제하시겠습니까?
+                              </div>
+                            ) as any}
+                            okText="삭제"
+                            cancelText="취소"
+                            okButtonProps={{ danger: true }}
+                            onConfirm={async () => {
+                              try {
+                                await window.gcs.deletePrefix(full);
+                                await listObjects();
+                                message.success('폴더 삭제 완료');
+                              } catch (e: any) {
+                                message.error(e?.message || String(e));
+                              }
+                            }}
+                          >
+                            <Button size="small" danger icon={<DeleteOutlined />}>삭제</Button>
+                          </Popconfirm>
+                        </Space>
+                      </div>
+                    ]}
+                  >
+                    <List.Item.Meta
+                      avatar={<Avatar size={20} shape="square" style={{ background: 'transparent', color: '#1677ff' }} icon={<FolderFilled />} />}
+                      title={
+                        <Typography.Text
+                          strong
+                          ellipsis={{ tooltip: full }}
+                          style={{ maxWidth: '100%', cursor: 'pointer' }}
+                          onClick={() => setPrefix(full)}
+                        >
+                          {seg}
+                        </Typography.Text>
+                      }
+                    />
+                  </List.Item>
                 );
-              })}
-            </ul>
+              }}
+            />
           </div>
         )}
 
-        {/* Files table */}
-        <Table
-          size="small"
-          rowKey={(r) => r.name}
-          dataSource={displayItems}
-          pagination={false}
-          rowSelection={{
-            selectedRowKeys: selectedKeys,
-            onChange: (keys) => setSelectedKeys(keys),
+        {/* Files list with Dropdown context menu */}
+        <Dropdown
+          trigger={["contextMenu"]}
+          onOpenChange={(open) => { if (!open) setCtxTarget(null); }}
+          menu={{
+            items: [
+              { key: 'download', label: '다운로드' },
+              { type: 'divider' },
+              { key: 'copyPath', label: '경로 복사    Ctrl+Shift+C' },
+              { key: 'copyFile', label: '파일명 복사    Ctrl+C' },
+              { type: 'divider' },
+              { key: 'move', label: '이동    M' },
+              { key: 'rename', label: '이름변경    F2' },
+              { key: 'delete', label: '삭제    Del' },
+            ],
+            onClick: (e) => {
+              const map: Record<string, () => void> = {
+                download: ctxDownload,
+                copyPath: ctxCopyPath,
+                copyFile: ctxCopyFile,
+                move: ctxMove,
+                rename: ctxRename,
+                delete: ctxDelete,
+              };
+              const fn = map[e.key as string];
+              if (fn) fn();
+            },
           }}
-          columns={[
-            {
-              title: '이름',
-              dataIndex: 'name',
-              key: 'name',
-              render: (_: any, it: any) => <code>{it.name.slice(prefix.length)}</code>,
-            },
-            {
-              title: '경로',
-              key: 'path',
-              render: (_: any, it: any) => {
-                const idx = it.name.lastIndexOf('/')
-                const p = idx >= 0 ? it.name.slice(0, idx+1) : '';
-                return <span style={{ color: '#666' }}>{p}</span>;
+        >
+          <div
+            style={{ width: '100%' }}
+            onContextMenu={(e) => {
+              const el = e.target as HTMLElement;
+              const tr = el.closest('tr[data-row-key]') as HTMLElement | null;
+              if (tr) {
+                const key = tr.getAttribute('data-row-key');
+                if (key) setCtxTarget(key);
+              }
+            }}
+          >
+          <style>{`
+            .row-uploading td { background-color: #fff7e6; }
+          `}</style>
+          <Table
+            size="small"
+            pagination={false}
+            rowKey={(r) => r.name}
+            dataSource={displayItems}
+            columns={[
+              {
+                title: (() => {
+                  const onClick = () => {
+                    if (sortKey === 'name') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+                    else { setSortKey('name'); setSortDir('asc'); }
+                  };
+                  return (
+                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'name' ? '#1677ff' : undefined }} onClick={onClick}>
+                      이름 {sortKey === 'name' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
+                    </span>
+                  );
+                })(),
+                dataIndex: 'name',
+                key: 'name',
+                render: (v: string) => <code>{v.slice(prefix.length)}</code>,
               },
-            },
-            {
-              title: '크기',
-              dataIndex: 'size',
-              key: 'size',
-              width: 110,
-              align: 'right' as const,
-              render: (v: number) => <span>{formatBytes(String(v||0))}</span>,
-            },
-            {
-              title: '수정일',
-              dataIndex: 'updated',
-              key: 'updated',
-              width: 180,
-              render: (v?: string) => v ? new Date(v).toLocaleString() : '-',
-            },
-            {
-              title: '작업',
-              key: 'actions',
-              width: 220,
-              render: (_: any, it: any) => (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button onClick={() => downloadItem(it.name)}>다운로드</button>
-                  <button onClick={() => deleteItem(it.name)}>삭제</button>
-                  <button onClick={() => openRename(it.name)}>이름변경</button>
-                </div>
-              )
-            }
-          ]}
-        />
+              {
+                title: '상태',
+                key: 'status',
+                width: 160,
+                render: (_: any, it: { name: string }) => {
+                  const uploading = Object.values(ops).find(o => o.kind === 'upload' && o.name === it.name);
+                  if (uploading) {
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <LoadingOutlined style={{ color: '#1677ff' }} />
+                        <span style={{ color: '#1677ff' }}>업로드 중</span>
+                        <Progress percent={uploading.percent} size="small" style={{ flex: 1, minWidth: 80 }} />
+                      </div>
+                    );
+                  }
+                  // Show failure state if exists
+                  const fail = failed[it.name];
+                  if (fail && (fail.upload || fail.download || fail.rename)) {
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <CloseCircleTwoTone twoToneColor="#ff4d4f" />
+                        <span style={{ color: '#ff4d4f' }}>실패</span>
+                        {fail.upload && (
+                          <Tooltip title="업로드 재시도">
+                            <Button size="small" icon={<RedoOutlined />} onClick={() => retryUpload(it.name)} />
+                          </Tooltip>
+                        )}
+                        {fail.download && (
+                          <Tooltip title="다운로드 재시도">
+                            <Button size="small" icon={<RedoOutlined />} onClick={() => retryDownload(it.name)} />
+                          </Tooltip>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <CheckCircleTwoTone twoToneColor="#52c41a" />
+                      <span style={{ color: '#52c41a' }}>완료</span>
+                    </div>
+                  );
+                },
+              },
+              {
+                title: '경로',
+                key: 'path',
+                render: (_: any, it: any) => {
+                  const idx = it.name.lastIndexOf('/');
+                  const p = idx >= 0 ? it.name.slice(0, idx + 1) : '';
+                  return <span style={{ color: '#666' }}>{p}</span>;
+                },
+              },
+              {
+                title: (() => {
+                  const onClick = () => {
+                    if (sortKey === 'size') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+                    else { setSortKey('size'); setSortDir('asc'); }
+                  };
+                  return (
+                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'size' ? '#1677ff' : undefined }} onClick={onClick}>
+                      크기 {sortKey === 'size' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
+                    </span>
+                  );
+                })(),
+                dataIndex: 'size',
+                key: 'size',
+                width: 110,
+                align: 'right' as const,
+                render: (v: number) => <span>{formatBytes(String(v || 0))}</span>,
+              },
+              {
+                title: (() => {
+                  const onClick = () => {
+                    if (sortKey === 'updated') setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
+                    else { setSortKey('updated'); setSortDir('asc'); }
+                  };
+                  return (
+                    <span style={{ cursor: 'pointer', userSelect: 'none', color: sortKey === 'updated' ? '#1677ff' : undefined }} onClick={onClick}>
+                      수정일 {sortKey === 'updated' ? (sortDir === 'asc' ? <SortAscendingOutlined /> : <SortDescendingOutlined />) : null}
+                    </span>
+                  );
+                })(),
+                key: 'updated',
+                width: 180,
+                render: (_: any, it: { updated?: string }) => it.updated ? new Date(it.updated).toLocaleString() : '-',
+              },
+            ]}
+          />
+          </div>
+        </Dropdown>
       </Spin>
       {/* Status bar */}
       <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #eee', color: '#666', display: 'flex', gap: 12 }}>
         <span>표시: {displayItems.length.toLocaleString()}개</span>
         <span>선택: {selectedKeys.length.toLocaleString()}개</span>
+        {Object.keys(ops).length > 0 && (
+          <span style={{ color: '#1677ff' }}>
+            <LoadingOutlined /> 진행 중: {Object.keys(ops).length}개
+          </span>
+        )}
+        {Object.keys(failed).length > 0 && (
+          <span style={{ color: '#ff4d4f' }}>
+            <CloseCircleTwoTone twoToneColor="#ff4d4f" /> 실패: {Object.keys(failed).length}개
+          </span>
+        )}
       </div>
       {/* Error banner removed; using message.error */}
       {/* Rename Modal */}
@@ -607,6 +871,7 @@ function App() {
           <div><small>원본: <code>{renameModal.src}</code></small></div>
         </div>
       </Modal>
+      {/* Dropdown handles context menu; no custom overlay needed */}
       {/* Move Selected Modal */}
       <Modal
         open={moveModal.open}
@@ -619,11 +884,97 @@ function App() {
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div><small>선택: {selectedKeys.length}개</small></div>
-          <Input
-            placeholder="대상 폴더 경로(예: a/b/) — 비우면 root"
-            value={moveModal.target}
-            onChange={(e) => setMoveModal(m => ({ ...m, target: e.target.value }))}
-          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <small>현재 대상:</small>
+            <code>{moveModal.target || 'root'}</code>
+            <button
+              disabled={moveModal.busy}
+              onClick={() => setMoveModal(m => ({ ...m, target: movePickerPrefix }))}
+              style={{ marginLeft: 'auto' }}
+            >이 폴더 선택</button>
+          </div>
+          {/* Breadcrumb for picker + sort controls */}
+          <div style={{ color: '#555', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <strong>이동할 폴더 선택:</strong>{' '}
+              <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setMovePickerPrefix('')}>root</span>
+              {movePickerPrefix.split('/').filter(Boolean).map((seg, idx, arr) => {
+                const to = arr.slice(0, idx + 1).join('/') + '/';
+                return (
+                  <span key={to}>
+                    {' / '}
+                    <span style={{ cursor: 'pointer', color: '#1890ff' }} onClick={() => setMovePickerPrefix(to)}>{seg}</span>
+                  </span>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <small>정렬:</small>
+              <button onClick={() => setMovePickerAsc(true)} disabled={movePickerAsc} title="이름 오름차순">
+                <SortAscendingOutlined />
+              </button>
+              <button onClick={() => setMovePickerAsc(false)} disabled={!movePickerAsc} title="이름 내림차순">
+                <SortDescendingOutlined />
+              </button>
+              <small style={{ color: '#888' }}>({movePickerFolders.length})</small>
+            </div>
+          </div>
+          {/* Child folders list */}
+          <div
+            style={{ maxHeight: 220, overflow: 'auto', border: '1px solid #eee', borderRadius: 6, padding: 8, background: '#fafafa' }}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (movePickerSortedFolders.length === 0) return;
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setMovePickerIndex(i => {
+                  const ni = Math.min((i < 0 ? 0 : i) + 1, movePickerSortedFolders.length - 1);
+                  setTimeout(() => document.getElementById(`move-folder-${ni}`)?.scrollIntoView({ block: 'nearest' }), 0);
+                  return ni;
+                });
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setMovePickerIndex(i => {
+                  const ni = Math.max((i < 0 ? 0 : i) - 1, 0);
+                  setTimeout(() => document.getElementById(`move-folder-${ni}`)?.scrollIntoView({ block: 'nearest' }), 0);
+                  return ni;
+                });
+              } else if (e.key === 'Enter') {
+                e.preventDefault();
+                const full = movePickerSortedFolders[Math.max(0, movePickerIndex)];
+                if (full) setMovePickerPrefix(full);
+              }
+            }}
+            role="listbox"
+            aria-label="이동 대상 하위 폴더"
+          >
+            {movePickerLoading ? (
+              <div style={{ color: '#888' }}>불러오는 중…</div>
+            ) : (
+              <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+                {movePickerFolders.length === 0 && (
+                  <li style={{ color: '#888' }}>하위 폴더가 없습니다</li>
+                )}
+                {movePickerSortedFolders.map((full, i) => {
+                  const seg = full.slice(movePickerPrefix.length).replace(/\/$/, '');
+                  return (
+                    <li
+                      key={full}
+                      id={`move-folder-${i}`}
+                      role="option"
+                      aria-selected={i === movePickerIndex}
+                      onClick={() => { setMovePickerIndex(i); setMovePickerPrefix(full); }}
+                      onMouseEnter={() => setMovePickerIndex(i)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 6px', cursor: 'pointer', borderRadius: 4, background: i === movePickerIndex ? '#e6f4ff' : undefined }}
+                    >
+                      <FolderFilled style={{ color: '#faad14' }} />
+                      <strong>{seg}</strong>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <input type="checkbox" checked={moveModal.overwrite} onChange={(e) => setMoveModal(m => ({ ...m, overwrite: e.target.checked }))} />
             덮어쓰기 허용
