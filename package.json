@@ -1,6 +1,6 @@
 {
   "name": "gcs-file-manager",
-  "version": "1.0.2",
+  "version": "1.0.5",
   "description": "Google Cloud Storage File Manager with Drag & Drop",
   "author": "Baewoong Kim",
   "main": "dist/main.js",
@@ -58,8 +58,9 @@
     ]
   },
   "build": {
-    "appId": "com.gcs.filemanager.v2",
-    "productName": "GCS File Manager",
+    "appId": "com.gcs.filemanager.v2.1",
+    "buildResources": "assets",
+    "productName": "GCS File Manager v2",
     "asar": true,
     "extraMetadata": {
       "main": "dist/main.js"
@@ -80,13 +81,17 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "8725886_file_landscape_icon.ico",
+      "icon": "app-icon-v2.ico",
       "executableName": "GCSFileManagerV2",
       "signAndEditExecutable": false,
       "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
-      "shortcutName": "GCS File Manager v2"
+      "shortcutName": "GCS File Manager v2",
+      "createDesktopShortcut": "always",
+      "installerIcon": "app-icon-v2.ico",
+      "uninstallerIcon": "app-icon-v2.ico",
+      "installerHeaderIcon": "app-icon-v2.ico"
     },
     "linux": {
       "target": "AppImage",

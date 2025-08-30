@@ -7,6 +7,12 @@ import { Readable } from 'stream';
 
 let mainWindow: BrowserWindow | null = null;
 
+// Resolve asset path both in dev (cwd) and prod (packaged next to dist/)
+const assetPath = (name: string) => {
+  if (isDev) return path.join(process.cwd(), 'assets', name);
+  return path.join(__dirname, '..', 'assets', name);
+};
+
 // Disable GPU acceleration to avoid GPU process crashes on some Windows environments
 app.disableHardwareAcceleration();
 
@@ -14,6 +20,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    icon: process.platform === 'win32' ? assetPath('app-icon-v2.ico') : (process.platform === 'darwin' ? assetPath('icon.icns') : assetPath('icon.png')),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -35,7 +42,13 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Set AppUserModelID for Windows taskbar grouping and notifications
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.gcs.filemanager.v2');
+  }
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

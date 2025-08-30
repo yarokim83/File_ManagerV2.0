@@ -1,7 +1,7 @@
 import React from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Modal, Input, message, Spin, Dropdown, Table, Progress, Button, Tooltip, List, Space, Typography, Popconfirm, Avatar } from 'antd';
-import { FolderFilled, SortAscendingOutlined, SortDescendingOutlined, CloudUploadOutlined, CloudDownloadOutlined, EditOutlined, LoadingOutlined, CheckCircleTwoTone, CloseCircleTwoTone, RedoOutlined, DeleteOutlined, ClockCircleOutlined } from '@ant-design/icons';
+import { FolderFilled, SortAscendingOutlined, SortDescendingOutlined, CloudUploadOutlined, CloudDownloadOutlined, EditOutlined, LoadingOutlined, CheckCircleTwoTone, CloseCircleTwoTone, RedoOutlined, DeleteOutlined, ClockCircleOutlined, PushpinOutlined, PushpinFilled } from '@ant-design/icons';
 
 function App() {
   const [items, setItems] = React.useState<{ name: string; size: number; updated?: string }[]>([]);
@@ -17,14 +17,20 @@ function App() {
   const [sortKey, setSortKey] = React.useState<'name'|'size'|'updated'>('name');
   const [sortDir, setSortDir] = React.useState<'asc'|'desc'>('asc');
   // Column widths (resizable) with localStorage persistence
-  type ColKey = 'name' | 'status' | 'path' | 'size' | 'updated';
+  type ColKey = 'pin' | 'name' | 'status' | 'path' | 'size' | 'updated';
   const [colW, setColW] = React.useState<Record<ColKey, number>>(() => {
+    const defaults: Record<ColKey, number> = { pin: 44, name: 500, status: 120, path: 90, size: 120, updated: 180 };
     try {
       const raw = localStorage.getItem('table.colW');
-      if (raw) return JSON.parse(raw);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return { ...defaults, ...parsed } as Record<ColKey, number>;
+      }
     } catch {}
-    return { name: 360, status: 160, path: 260, size: 110, updated: 180 };
+    return defaults;
   });
+  // Hovered column header for resize handle visual feedback
+  const [hoverCol, setHoverCol] = React.useState<ColKey | null>(null);
   React.useEffect(() => {
     try { localStorage.setItem('table.colW', JSON.stringify(colW)); } catch {}
   }, [colW]);
@@ -73,7 +79,16 @@ function App() {
         </span>
         <div
           onMouseDown={(e) => startDrag(colKey, e)}
-          style={{ position: 'absolute', top: 0, right: 0, width: 6, cursor: 'col-resize', height: '100%' }}
+          style={{
+            position: 'absolute', top: '50%', right: 0, width: 10, cursor: 'col-resize', height: '50%',
+            transform: 'translateY(-50%)',
+            background: hoverCol === colKey ? 'rgba(0,0,0,0.12)' : 'transparent',
+            borderRadius: 4,
+            zIndex: 2,
+            borderRight: hoverCol === colKey ? '1px solid rgba(0,0,0,0.15)' : undefined,
+          }}
+          onMouseEnter={() => setHoverCol(colKey)}
+          onMouseLeave={() => setHoverCol(null)}
           title="폭 조절"
         />
       </div>
@@ -83,6 +98,15 @@ function App() {
   const [query, setQuery] = React.useState('');
   const [lastQueryMs, setLastQueryMs] = React.useState(0);
   const [selectedKeys, setSelectedKeys] = React.useState<React.Key[]>([]);
+  // Selection helpers: last clicked row index and drag-select state
+  const [lastClickedIndex, setLastClickedIndex] = React.useState<number>(-1);
+  const [dragSelecting, setDragSelecting] = React.useState(false);
+  const dragStateRef = React.useRef<{ startIndex: number; addMode: boolean; base: Set<string> } | null>(null);
+  // Keys currently in the drag range for strong visual feedback
+  const [dragRangeKeys, setDragRangeKeys] = React.useState<Set<string>>(new Set());
+  // Auto-scroll during drag
+  const mouseYRef = React.useRef<number>(0);
+  const rafRef = React.useRef<number | null>(null);
   const [moveModal, setMoveModal] = React.useState<{ open: boolean; target: string; overwrite: boolean; busy?: boolean; progress?: { done: number; total: number; failed: number } }>({ open: false, target: '', overwrite: false });
   // Move folder picker state
   const [movePickerPrefix, setMovePickerPrefix] = React.useState<string>('');
@@ -107,6 +131,42 @@ function App() {
   const [ctxTarget, setCtxTarget] = React.useState<string | null>(null);
   // Failed operations by object name
   const [failed, setFailed] = React.useState<Record<string, { upload?: boolean; download?: boolean; rename?: boolean }>>({});
+
+  // Pinned items (favorites)
+  const [pinned, setPinned] = React.useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('pinned.items');
+      if (raw) return new Set<string>(JSON.parse(raw));
+    } catch {}
+    return new Set<string>();
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem('pinned.items', JSON.stringify(Array.from(pinned))); } catch {}
+  }, [pinned]);
+  const togglePin = React.useCallback((name: string) => {
+    setPinned(prev => {
+      const n = new Set(prev);
+      if (n.has(name)) n.delete(name); else n.add(name);
+      return n;
+    });
+  }, []);
+
+  // Helpers: escape regex and highlight matches with <mark>
+  const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const highlight = (text: string, q: string) => {
+    const needle = (q || '').trim();
+    if (!needle) return text;
+    try {
+      const re = new RegExp(`(${escapeRegExp(needle)})`, 'gi');
+      const parts = text.split(re);
+      // parts: [before, match, middle, match, after]
+      return parts.map((part, i) => (
+        i % 2 === 1 ? <mark key={i}>{part}</mark> : <React.Fragment key={i}>{part}</React.Fragment>
+      ));
+    } catch {
+      return text;
+    }
+  };
   // Minimal virtual scroll state
   const [rowH, setRowH] = React.useState(30);
   const [scrollY, setScrollY] = React.useState(560);
@@ -121,6 +181,10 @@ function App() {
     const arr = items.slice();
     const dirMul = sortDir === 'asc' ? 1 : -1;
     arr.sort((a, b) => {
+      // Pinned first
+      const ap = pinned.has(a.name) ? 1 : 0;
+      const bp = pinned.has(b.name) ? 1 : 0;
+      if (ap !== bp) return bp - ap;
       if (sortKey === 'name') return a.name.localeCompare(b.name) * dirMul;
       if (sortKey === 'size') return ((a.size||0) - (b.size||0)) * dirMul;
       // updated
@@ -129,7 +193,7 @@ function App() {
       return (at - bt) * dirMul;
     });
     return arr;
-  }, [items, sortKey, sortDir]);
+  }, [items, sortKey, sortDir, pinned]);
   // debounced query filter
   function useDebounced<T>(value: T, ms: number) {
     const [v, setV] = React.useState(value);
@@ -604,18 +668,121 @@ function App() {
     setOps(prev => { const n = { ...prev }; delete n[opId]; return n; });
   };
 
-  const deleteItem = (name: string) => {
+  // Restore a single file from _trash/
+  const restoreItem = async (name: string) => {
+    if (!name.startsWith('_trash/')) { message.warning('휴지통 항목이 아닙니다'); return; }
+    const dest = name.replace(/^_trash\//, '');
+    let overwrite = true;
+    try {
+      const { exists } = await window.gcs.exists(dest);
+      if (exists) {
+        await new Promise<void>((resolve, reject) => {
+          Modal.confirm({
+            title: '복원 - 덮어쓰기 확인',
+            content: <div><code>{dest}</code> 가 존재합니다. 덮어쓰시겠습니까?</div>,
+            okText: '덮어쓰기',
+            cancelText: '취소',
+            onOk: () => resolve(),
+            onCancel: () => reject(new Error('CANCEL')),
+          });
+        });
+        overwrite = true;
+      }
+    } catch (e: any) {
+      if (e && e.message === 'CANCEL') return;
+    }
+    try {
+      await window.gcs.rename(name, dest, overwrite);
+      await listObjects();
+      await refreshUsage();
+      message.success('복원되었습니다');
+    } catch (e: any) { message.error(e?.message || String(e)); }
+  };
+
+  // Restore a folder prefix from _trash/
+  const restorePrefix = async (full: string) => {
+    if (!full.startsWith('_trash/')) { message.warning('휴지통 폴더가 아닙니다'); return; }
+    const dest = full.replace(/^_trash\//, '');
+    let overwrite = false;
+    try {
+      const probe = await window.gcs.list({ prefix: dest, maxResults: 1 });
+      const has = (probe.items && probe.items.length > 0) || (probe.prefixes && probe.prefixes.length > 0);
+      if (has) {
+        await new Promise<void>((resolve, reject) => {
+          Modal.confirm({
+            title: '복원 - 덮어쓰기 확인',
+            content: <div><code>{dest}</code> 가 이미 존재합니다. 덮어쓰시겠습니까?</div>,
+            okText: '덮어쓰기',
+            cancelText: '취소',
+            onOk: () => resolve(),
+            onCancel: () => reject(new Error('CANCEL')),
+          });
+        });
+        overwrite = true;
+      }
+    } catch (e: any) {
+      if (e && e.message === 'CANCEL') return;
+    }
+    try {
+      const { opId } = await window.gcs.startRenamePrefix(full, dest, overwrite);
+      setOps(prev => ({ ...prev, [opId]: { name: `${full} -> ${dest}`, kind: 'rename', percent: 0 } }));
+      message.success('복원을 시작했습니다');
+    } catch (e: any) { message.error(e?.message || String(e)); }
+  };
+
+  // Empty Trash utility
+  const emptyTrash = () => {
     Modal.confirm({
-      title: '삭제 확인',
-      content: <div><code>{name}</code> 를 삭제하시겠습니까?</div>,
-      okText: '삭제',
+      title: '휴지통 비우기',
+      content: <div><code>_trash/</code> 하위의 모든 항목을 영구 삭제합니다.</div>,
+      okText: '영구 삭제',
       okButtonProps: { danger: true },
       cancelText: '취소',
       onOk: async () => {
         try {
-          await window.gcs.delete(name);
+          await window.gcs.deletePrefix('_trash/');
           await listObjects();
-          message.success('삭제 완료');
+          await refreshUsage();
+          message.success('휴지통을 비웠습니다');
+        } catch (e: any) { message.error(e?.message || String(e)); }
+      }
+    });
+  };
+
+  // Soft delete: move to _trash/
+  const deleteItem = (name: string) => {
+    const inTrash = name.startsWith('_trash/');
+    if (inTrash) {
+      Modal.confirm({
+        title: '영구 삭제 확인',
+        content: <div><code>{name}</code> 를 영구 삭제하시겠습니까?</div>,
+        okText: '영구 삭제',
+        okButtonProps: { danger: true },
+        cancelText: '취소',
+        onOk: async () => {
+          try {
+            await window.gcs.delete(name);
+            await listObjects();
+            message.success('영구 삭제됨');
+          } catch (e: any) {
+            message.error(e?.message || String(e));
+          }
+        },
+      });
+      return;
+    }
+    const dest = `_trash/${name}`;
+    Modal.confirm({
+      title: '보관함으로 이동',
+      content: <div><code>{name}</code> 를 <code>{dest}</code> 로 이동합니다.</div>,
+      okText: '이동',
+      cancelText: '취소',
+      onOk: async () => {
+        try {
+          await window.gcs.rename(name, dest, true);
+          await listObjects();
+          await refreshUsage();
+          message.success('보관함으로 이동됨');
         } catch (e: any) {
           message.error(e?.message || String(e));
         }
@@ -726,12 +893,20 @@ function App() {
           <Tooltip title="새 폴더">
             <Button size="small" onClick={() => setCreateFolder({ open: true, name: '' })} disabled={loading}>새 폴더</Button>
           </Tooltip>
+          <Tooltip title="휴지통으로 이동">
+            <Button size="small" onClick={() => setPrefix('_trash/')}>휴지통</Button>
+          </Tooltip>
           <span style={{ color: '#555', marginLeft: 4 }}>
             {usageLoading ? '용량 조회 중…' : (usage ? `용량 ${formatBytes(usage.bytes)} • ${usage.count.toLocaleString()}개` : '-')}
           </span>
           <Tooltip title="용량 새로고침">
             <Button size="small" onClick={refreshUsage}>↻</Button>
           </Tooltip>
+          {prefix.startsWith('_trash/') && (
+            <Tooltip title="휴지통 비우기">
+              <Button size="small" danger onClick={emptyTrash}>휴지통 비우기</Button>
+            </Tooltip>
+          )}
         </Space>
       </div>
       {/* Search + quick toggles */}
@@ -826,6 +1001,7 @@ function App() {
               dataSource={sortedFolders}
               renderItem={(full: string) => {
                 const seg = full.slice(prefix.length).replace(/\/$/, '');
+                const inTrash = full.startsWith('_trash/');
                 return (
                   <List.Item
                     key={full}
@@ -841,21 +1017,35 @@ function App() {
                           <Button size="small" onClick={() => setRenameModal({ open: true, src: full, value: seg })} icon={<EditOutlined />}>
                             이름변경
                           </Button>
+                          {inTrash && (
+                            <Button size="small" onClick={() => restorePrefix(full)} icon={<RedoOutlined />}>복원</Button>
+                          )}
                           <Popconfirm
-                            title="폴더 삭제 확인"
+                            title={inTrash ? '폴더 영구 삭제 확인' : '보관함으로 이동'}
                             description={(
                               <div>
-                                <code>{full}</code> 및 하위 모든 파일을 삭제하시겠습니까?
+                                {inTrash ? (
+                                  <span><code>{full}</code> 및 하위 모든 파일을 영구 삭제하시겠습니까?</span>
+                                ) : (
+                                  <span><code>{full}</code> 를 <code>{`_trash/${full}`}</code> 로 이동합니다.</span>
+                                )}
                               </div>
                             ) as any}
-                            okText="삭제"
+                            okText={inTrash ? '영구 삭제' : '이동'}
                             cancelText="취소"
-                            okButtonProps={{ danger: true }}
+                            okButtonProps={{ danger: inTrash }}
                             onConfirm={async () => {
                               try {
-                                await window.gcs.deletePrefix(full);
-                                await listObjects();
-                                message.success('폴더 삭제 완료');
+                                if (inTrash) {
+                                  await window.gcs.deletePrefix(full);
+                                  await listObjects();
+                                  message.success('폴더 영구 삭제 완료');
+                                } else {
+                                  const dest = `_trash/${full}`;
+                                  const { opId } = await window.gcs.startRenamePrefix(full, dest, true);
+                                  setOps(prev => ({ ...prev, [opId]: { name: `${full} -> ${dest}`, kind: 'rename', percent: 0 } }));
+                                  message.success('보관함으로 이동 시작');
+                                }
                               } catch (e: any) {
                                 message.error(e?.message || String(e));
                               }
@@ -892,16 +1082,19 @@ function App() {
           trigger={["contextMenu"]}
           onOpenChange={(open) => { if (!open) setCtxTarget(null); }}
           menu={{
-            items: [
-              { key: 'download', label: '다운로드' },
-              { type: 'divider' },
-              { key: 'copyPath', label: '경로 복사    Ctrl+Shift+C' },
-              { key: 'copyFile', label: '파일명 복사    Ctrl+C' },
-              { type: 'divider' },
-              { key: 'move', label: '이동    M' },
-              { key: 'rename', label: '이름변경    F2' },
-              { key: 'delete', label: '삭제    Del' },
-            ],
+            items: (() => {
+              const isTrash = !!ctxTarget && String(ctxTarget).startsWith('_trash/');
+              const base = [
+                { key: 'download', label: '다운로드' },
+                { type: 'divider' as const },
+                { key: 'copyPath', label: '경로 복사    Ctrl+Shift+C' },
+                { key: 'copyFile', label: '파일명 복사    Ctrl+C' },
+                { type: 'divider' as const },
+                ...(isTrash ? [{ key: 'restore', label: '복원' } as const] : [{ key: 'move', label: '이동    M' } as const, { key: 'rename', label: '이름변경    F2' } as const]),
+                { key: 'delete', label: isTrash ? '영구 삭제    Del' : '삭제(보관함으로)    Del' },
+              ];
+              return base as any;
+            })(),
             onClick: (e) => {
               const map: Record<string, () => void> = {
                 download: ctxDownload,
@@ -909,6 +1102,7 @@ function App() {
                 copyFile: ctxCopyFile,
                 move: ctxMove,
                 rename: ctxRename,
+                restore: () => { if (ctxTarget) restoreItem(ctxTarget); setCtxTarget(null); },
                 delete: ctxDelete,
               };
               const fn = map[e.key as string];
@@ -930,50 +1124,178 @@ function App() {
               }
             }}
           >
-          <style>{`
-            /* Compact spacing */
-            .ant-table-thead > tr > th { padding: 6px 8px; }
-            .ant-table-tbody > tr > td { padding: 6px 8px; }
-            .ant-table { font-size: 12.5px; }
-            .ant-list-item { padding: 6px 8px; }
-            h3, h4 { margin: 8px 0; }
-            /* Keep upload highlighting */
-            .row-uploading td { background-color: #fff7e6; }
-          `}</style>
-          <Table
-            size="small"
-            pagination={false}
-            rowKey={(r: any) => (r && r.__pad) ? r.__pad : r.name}
-            dataSource={vSlice.data as any}
-            scroll={{ x: colW.name + colW.status + colW.path + colW.size + colW.updated + 200, y: scrollY }}
-            sticky={{ offsetHeader: 0 }}
-            rowSelection={{
+            <Table
+              size="small"
+              pagination={false}
+              rowKey={(r: any) => (r && r.__pad) ? r.__pad : r.name}
+              dataSource={vSlice.data as any}
+              scroll={{ x: colW.pin + colW.name + colW.status + colW.path + colW.size + colW.updated + 200, y: scrollY }}
+              sticky={{ offsetHeader: 0 }}
+              bordered
+              rowClassName={(record: any) => {
+              if (record && record.__pad) return '';
+              return dragSelecting && dragRangeKeys.has(record.name) ? 'row-drag-range' : '';
+              }}
+              rowSelection={{
               // disable selection for padding rows
               selectedRowKeys: selectedKeys,
               onChange: (keys) => setSelectedKeys((keys as React.Key[]).filter((k) => typeof k === 'string' && !String(k).startsWith('__')) as string[]),
               getCheckboxProps: (record: any) => ({ disabled: !!record?.__pad }),
               hideSelectAll: true,
-            }}
-            onRow={(record: any) => ({
-              onClick: (e) => { if (record?.__pad) e.stopPropagation(); },
-              onDoubleClick: (e) => { if (record?.__pad) e.stopPropagation(); },
-              onContextMenu: (e) => { if (record?.__pad) e.preventDefault(); },
-            })}
-            columns={[
+              }}
+              onRow={(record: any, rowIndex?: number) => {
+              const data = (vSlice.data as any[]);
+              // Build key->index map once per render
+              const keyIndex = new Map<string, number>();
+              for (let i = 0; i < data.length; i++) {
+                const r = data[i];
+                if (r && r.__pad) continue;
+                keyIndex.set(r.name, i);
+              }
+              const rowKey: string | null = record && !record.__pad ? record.name : null;
+              const getIndex = (key: string) => keyIndex.get(key) ?? -1;
+              const getRangeKeys = (a: number, b: number) => {
+                const [s, e] = a <= b ? [a, b] : [b, a];
+                const ks: string[] = [];
+                for (let i = s; i <= e; i++) {
+                  const r = data[i];
+                  if (!r || r.__pad) continue;
+                  ks.push(r.name);
+                }
+                return ks;
+              };
+              const applySelection = (keys: string[]) => setSelectedKeys(keys);
+              const onMouseUpDoc = () => {
+                setDragSelecting(false);
+                dragStateRef.current = null;
+                setDragRangeKeys(new Set());
+                if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+                document.removeEventListener('mouseup', onMouseUpDoc);
+                document.removeEventListener('mousemove', onDocMouseMove);
+              };
+              const onDocMouseMove = (ev: MouseEvent) => { mouseYRef.current = ev.clientY; };
+              const startAutoScroll = () => {
+                if (rafRef.current) return;
+                const loop = () => {
+                  if (!dragSelecting) { rafRef.current = null; return; }
+                  const wrap = tableWrapRef.current as HTMLElement | null;
+                  const scroller = wrap ? (wrap.querySelector('.ant-table-body') as HTMLElement | null) : null;
+                  if (scroller) {
+                    const rect = scroller.getBoundingClientRect();
+                    const y = mouseYRef.current;
+                    const margin = 30; // px
+                    const maxSpeed = 18; // px/frame
+                    let dy = 0;
+                    if (y < rect.top + margin) {
+                      dy = -maxSpeed * (1 - (y - rect.top) / margin);
+                    } else if (y > rect.bottom - margin) {
+                      dy = maxSpeed * (1 - (rect.bottom - y) / margin);
+                    }
+                    if (dy) scroller.scrollTop += dy;
+                  }
+                  rafRef.current = requestAnimationFrame(loop);
+                };
+                rafRef.current = requestAnimationFrame(loop);
+              };
+              return {
+                onClick: (e) => {
+                  if (record?.__pad) { e.stopPropagation(); return; }
+                  if (!rowKey) return;
+                  const idx = typeof rowIndex === 'number' ? rowIndex : getIndex(rowKey);
+                  const isShift = e.shiftKey;
+                  const isCtrl = e.ctrlKey || e.metaKey;
+                  if (isShift && lastClickedIndex >= 0) {
+                    const range = getRangeKeys(lastClickedIndex, idx);
+                    const next = isCtrl ? Array.from(new Set([...(selectedKeys as string[]), ...range])) : range;
+                    applySelection(next);
+                  } else if (isCtrl) {
+                    const set = new Set(selectedKeys as string[]);
+                    if (set.has(rowKey)) set.delete(rowKey); else set.add(rowKey);
+                    applySelection(Array.from(set));
+                    setLastClickedIndex(idx);
+                  } else {
+                    applySelection([rowKey]);
+                    setLastClickedIndex(idx);
+                  }
+                },
+                onMouseDown: (e) => {
+                  if (record?.__pad) return;
+                  if (e.button !== 0) return; // only left button
+                  const idx = typeof rowIndex === 'number' ? rowIndex : (rowKey ? getIndex(rowKey) : -1);
+                  if (idx < 0) return;
+                  const base = new Set(selectedKeys as string[]);
+                  const addMode = !base.has(rowKey!); // if not selected, drag adds; if selected, drag removes
+                  dragStateRef.current = { startIndex: idx, addMode, base };
+                  setDragSelecting(true);
+                  mouseYRef.current = e.clientY;
+                  document.addEventListener('mousemove', onDocMouseMove);
+                  startAutoScroll();
+                  document.addEventListener('mouseup', onMouseUpDoc);
+                },
+                onMouseEnter: () => {
+                  const st = dragStateRef.current; if (!st || !dragSelecting) return;
+                  const idx = typeof rowIndex === 'number' ? rowIndex : (rowKey ? getIndex(rowKey) : -1);
+                  if (idx < 0) return;
+                  const range = new Set(getRangeKeys(st.startIndex, idx));
+                  const next = new Set(st.base);
+                  if (st.addMode) {
+                    range.forEach(k => next.add(k));
+                  } else {
+                    range.forEach(k => next.delete(k));
+                  }
+                  applySelection(Array.from(next));
+                  setDragRangeKeys(range);
+                },
+                onDoubleClick: (e) => { if (record?.__pad) e.stopPropagation(); },
+                onContextMenu: (e) => { if (record?.__pad) e.preventDefault(); },
+              };
+              }}
+              columns={[
+              {
+                title: Header('핀', 'pin'),
+                key: 'pin',
+                width: colW.pin,
+                fixed: 'left' as const,
+                align: 'center' as const,
+                ellipsis: true as const,
+                render: (_: any, it: any) => {
+                  if (it && it.__pad) return null;
+                  const pinnedNow = pinned.has(it.name);
+                  const Icon = pinnedNow ? PushpinFilled : PushpinOutlined;
+                  return (
+                    <Tooltip title={pinnedNow ? '핀 해제' : '핀 고정'}>
+                      <Button
+                        type="text"
+                        size="small"
+                        onClick={(e) => { e.stopPropagation(); togglePin(it.name); }}
+                        icon={<Icon style={{ color: pinnedNow ? '#faad14' : '#aaa' }} />}
+                      />
+                    </Tooltip>
+                  );
+                },
+              },
               {
                 title: Header('이름', 'name', 'name'),
                 dataIndex: 'name',
                 key: 'name',
                 width: colW.name,
                 fixed: 'left' as const,
-                render: (v: string, it: any) => it && it.__pad ? (
-                  <div style={{ height: it.__h }} />
-                ) : <code>{v.slice(prefix.length)}</code>,
+                ellipsis: true as const,
+                render: (v: string, it: any) => {
+                  if (it && it.__pad) return <div style={{ height: it.__h }} />;
+                  const rel = v.slice(prefix.length);
+                  return (
+                    <Tooltip title={rel} placement="topLeft">
+                      <span className="file-name-text">{highlight(rel, query)}</span>
+                    </Tooltip>
+                  );
+                },
               },
               {
                 title: Header('상태', 'status'),
                 key: 'status',
                 width: colW.status,
+                className: 'col-sep-strong',
                 render: (_: any, it: any) => {
                   if (it && it.__pad) return null;
                   const uploading = Object.values(ops).find(o => o.kind === 'upload' && o.name === it.name);
@@ -1012,23 +1334,30 @@ function App() {
                 },
               },
               {
-                title: Header('경로', 'path'),
-                key: 'path',
-                width: colW.path,
-                render: (_: any, it: any) => {
-                  if (it && it.__pad) return null;
-                  const idx = it.name.lastIndexOf('/');
-                  const p = idx >= 0 ? it.name.slice(0, idx + 1) : '';
-                  return <span style={{ color: '#666' }}>{p}</span>;
-                },
-              },
-              {
                 title: Header('크기', 'size', 'size'),
                 dataIndex: 'size',
                 key: 'size',
                 width: colW.size,
                 align: 'right' as const,
+                className: 'col-sep-left',
                 render: (v: number, it: any) => it && it.__pad ? null : <span>{formatBytes(String(v || 0))}</span>,
+              },
+              {
+                title: Header('경로', 'path'),
+                key: 'path',
+                width: colW.path,
+                ellipsis: true as const,
+                className: 'col-sep-left col-path',
+                render: (_: any, it: any) => {
+                  if (it && it.__pad) return null;
+                  const idx = it.name.lastIndexOf('/');
+                  const p = idx >= 0 ? it.name.slice(0, idx + 1) : '';
+                  return (
+                    <Tooltip title={p || '-'} placement="topLeft">
+                      <span style={{ color: '#666' }}>{highlight(p, query)}</span>
+                    </Tooltip>
+                  );
+                },
               },
               {
                 title: Header('수정일', 'updated', 'updated'),
