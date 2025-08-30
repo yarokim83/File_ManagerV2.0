@@ -1,7 +1,8 @@
 {
   "name": "gcs-file-manager",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Google Cloud Storage File Manager with Drag & Drop",
+  "author": "",
   "main": "dist/main.js",
   "homepage": "./",
   "scripts": {
@@ -21,7 +22,6 @@
     "copy-to-clipboard": "^3.3.3",
     "electron-is-dev": "^2.0.0",
     "lodash.debounce": "^4.0.8",
-    "path": "^0.12.7",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.2.3",
@@ -58,24 +58,39 @@
     ]
   },
   "build": {
-    "appId": "com.gcs.filemanager",
+    "appId": "com.gcs.filemanager.v2",
     "productName": "GCS File Manager",
+    "asar": true,
+    "extraMetadata": {
+      "main": "dist/main.js"
+    },
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "assets"
     },
     "files": [
       "build/**/*",
-      "dist/main.js",
-      "node_modules/**/*"
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
     ],
     "mac": {
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "8725886_file_landscape_icon.ico",
+      "executableName": "GCSFileManagerV2",
+      "signAndEditExecutable": false,
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "shortcutName": "GCS File Manager v2"
     },
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "icon": "assets/icon.png"
     }
   }
 }
