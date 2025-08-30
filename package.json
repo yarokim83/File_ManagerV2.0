@@ -2,7 +2,7 @@
   "name": "gcs-file-manager",
   "version": "1.0.2",
   "description": "Google Cloud Storage File Manager with Drag & Drop",
-  "author": "",
+  "author": "Baewoong Kim",
   "main": "dist/main.js",
   "homepage": "./",
   "scripts": {
